@@ -16,6 +16,8 @@ pub enum BackendKind {
     Api,
     /// API when a key is available, otherwise CLI.
     Auto,
+    /// Your own OpenAI-compatible server (vLLM, Ollama, LM Studio, llama.cpp).
+    Local,
 }
 
 impl BackendKind {
@@ -24,6 +26,7 @@ impl BackendKind {
             "cli" => Some(Self::Cli),
             "api" => Some(Self::Api),
             "auto" => Some(Self::Auto),
+            "local" | "vllm" => Some(Self::Local),
             _ => None,
         }
     }
@@ -33,6 +36,7 @@ impl BackendKind {
             Self::Cli => "Claude Code CLI",
             Self::Api => "Anthropic API",
             Self::Auto => "Auto",
+            Self::Local => "Local server (vLLM)",
         }
     }
 }
@@ -56,6 +60,49 @@ pub struct Config {
     pub shield_watch: bool,
     /// Media player volume, 0.0 to 1.0.
     pub volume: f32,
+
+    // --- Local AI server (vLLM / any OpenAI-compatible API) ---
+    pub local_url: String,
+    /// Empty = use the first model the server lists.
+    pub local_model: String,
+    pub local_api_key: Option<String>,
+    /// Optional image model for `/v1/images/generations`.
+    pub image_model: String,
+
+    // --- Appearance ---
+    pub theme: String,
+    pub accent: Option<[u8; 3]>,
+    pub wallpaper: String,
+    pub wallpaper_image: Option<String>,
+    /// Animate the wallpaper (uses a little more power).
+    pub animate_wallpaper: bool,
+
+    // --- Voice ---
+    pub whisper_bin: Option<String>,
+    pub whisper_model: Option<String>,
+    pub speak_replies: bool,
+    pub wake_word: bool,
+
+    // --- Widgets ---
+    pub weather_city: String,
+
+    // --- Media ---
+    pub eq: [f32; 3],
+    pub bemusic_url: Option<String>,
+    pub bemusic_token: Option<String>,
+
+    // --- Orbit Shield ---
+    pub scheduled_scan: bool,
+    pub scan_hour: u8,
+    pub last_scheduled_scan_day: i64,
+
+    // --- Backup ---
+    pub backup_dir: Option<String>,
+    pub auto_backup: bool,
+    pub last_backup_day: i64,
+
+    /// Set once the first-run welcome is finished.
+    pub onboarded: bool,
 }
 
 impl Default for Config {
@@ -70,11 +117,44 @@ impl Default for Config {
             use_clamav: true,
             shield_watch: true,
             volume: 0.8,
+            local_url: "http://localhost:8000/v1".into(),
+            local_model: String::new(),
+            local_api_key: None,
+            image_model: String::new(),
+            theme: "orbit".into(),
+            accent: None,
+            wallpaper: "starfield".into(),
+            wallpaper_image: None,
+            animate_wallpaper: true,
+            whisper_bin: None,
+            whisper_model: None,
+            speak_replies: false,
+            wake_word: false,
+            weather_city: "London".into(),
+            eq: [0.0, 0.0, 0.0],
+            bemusic_url: None,
+            bemusic_token: None,
+            scheduled_scan: true,
+            scan_hour: 12,
+            last_scheduled_scan_day: 0,
+            backup_dir: None,
+            auto_backup: false,
+            last_backup_day: 0,
+            onboarded: false,
         }
     }
 }
 
 impl Config {
+    /// Folder for OrbitOS data (chats, playlists, window layout, …).
+    pub fn data_dir() -> PathBuf {
+        let d = dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("orbitos");
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
     pub fn path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))

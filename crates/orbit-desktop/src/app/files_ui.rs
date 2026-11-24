@@ -25,10 +25,11 @@ impl Desktop {
     pub(super) fn files_window(&mut self, ctx: &egui::Context) {
         let mut open = self.win.files;
         let mut actions: Vec<FileAction> = Vec::new();
-        egui::Window::new("Files")
+        if !self.wm_visible(WinId::Files) {
+            return;
+        }
+        self.wm_window(WinId::Files, "Files", [224.0, 44.0, 500.0, 320.0])
             .open(&mut open)
-            .default_size([500.0, 320.0])
-            .default_pos([224.0, 44.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("⬆ Up").on_hover_text("Parent folder").clicked() {
@@ -100,7 +101,7 @@ impl Desktop {
                         ui.painter().rect_filled(
                             rect.shrink(2.0),
                             egui::Rounding::same(8.0),
-                            theme::ACCENT.linear_multiply(if selected { 0.35 } else { 0.15 }),
+                            theme::accent().linear_multiply(if selected { 0.35 } else { 0.15 }),
                         );
                     }
                     let icon = egui::Rect::from_center_size(
@@ -149,7 +150,7 @@ impl Desktop {
             .show(ui, |ui| {
                 for e in &entries {
                     let label = if e.is_dir {
-                        RichText::new(format!("▸ {}", e.name)).color(theme::ACCENT)
+                        RichText::new(format!("▸ {}", e.name)).color(theme::accent())
                     } else {
                         RichText::new(&e.name)
                     };

@@ -14,10 +14,20 @@ dirs.workspace = true
 sysinfo.workspace = true
 ureq.workspace = true
 sha2 = "0.10"
+chrono.workspace = true
+notify = "6"
+lofty = "0.21"
+rand = "0.8"
+aes-gcm = "0.10"
+argon2 = "0.5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+cpal = { version = "0.15", optional = true }
 rodio = { version = "0.19", optional = true, default-features = false, features = ["symphonia-all"] }
 
 [features]
-default = ["audio"]
+default = ["audio", "voice"]
 # In-app music playback. Build with --no-default-features to skip it
 # (for example on Linux without ALSA headers); music then opens in mpv/VLC.
 audio = ["dep:rodio"]
+# Microphone capture for voice (push-to-talk and "Hey Orbit").
+voice = ["dep:cpal"]

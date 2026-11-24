@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub(super) enum ShieldTab {
     Scan,
     Quarantine,
+    Network,
 }
 
 pub(super) struct ShieldState {
@@ -31,6 +32,13 @@ pub(super) struct ShieldState {
     pub signatures: usize,
     pub updating: bool,
     pub confirm_delete: Option<QuarantineItem>,
+    pub live: Option<orbit_core::watch::LiveWatcher>,
+    pub last_schedule_check: Instant,
+    pub net: Vec<orbit_core::network::Connection>,
+    pub net_loading: bool,
+    pub net_err: Option<String>,
+    pub net_filter: String,
+    pub yara: bool,
 }
 
 impl ShieldState {
@@ -52,6 +60,13 @@ impl ShieldState {
             signatures: antivirus::Engines::load().signature_count(),
             updating: false,
             confirm_delete: None,
+            live: None,
+            last_schedule_check: Instant::now() - Duration::from_secs(3600),
+            net: Vec::new(),
+            net_loading: false,
+            net_err: None,
+            net_filter: String::new(),
+            yara: antivirus::find_yara().is_some(),
         }
     }
 }
@@ -117,17 +132,42 @@ impl Desktop {
         self.shield.findings = r.findings;
     }
 
-    /// Real-time protection: check new files in Downloads/Desktop.
+    /// Real-time protection (OS file events, falling back to polling) and
+    /// the daily scheduled scan.
     pub(super) fn shield_tick(&mut self) {
-        if !self.cfg.shield_watch || self.shield.last_poll.elapsed() < Duration::from_secs(4) {
+        // Scheduled scan: check once a minute.
+        if self.shield.last_schedule_check.elapsed() > Duration::from_secs(60) {
+            self.shield.last_schedule_check = Instant::now();
+            let hour = chrono::Timelike::hour(&chrono::Local::now());
+            if antivirus::scheduled_scan_due(&self.cfg, hour) && !self.shield.scanning {
+                self.cfg.last_scheduled_scan_day = orbit_core::today();
+                let _ = self.cfg.save();
+                self.push_note("Orbit Shield", "Running your daily quick scan");
+                self.start_scan(antivirus::quick_scan_paths());
+            }
+        }
+        if !self.cfg.shield_watch {
+            self.shield.live = None;
             return;
         }
-        self.shield.last_poll = Instant::now();
-        let watcher = self
-            .shield
-            .watcher
-            .get_or_insert_with(|| Watcher::new(antivirus::watch_paths()));
-        let new_files = watcher.poll();
+        if self.shield.live.is_none() && self.shield.watcher.is_none() {
+            match orbit_core::watch::LiveWatcher::new(&antivirus::watch_paths()) {
+                Ok(w) => self.shield.live = Some(w),
+                Err(_) => self.shield.watcher = Some(Watcher::new(antivirus::watch_paths())),
+            }
+        }
+        let new_files = if let Some(live) = self.shield.live.as_mut() {
+            live.ready()
+        } else if self.shield.last_poll.elapsed() >= Duration::from_secs(4) {
+            self.shield.last_poll = Instant::now();
+            self.shield
+                .watcher
+                .as_mut()
+                .map(|w| w.poll())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if new_files.is_empty() {
             return;
         }
@@ -143,6 +183,109 @@ impl Desktop {
                 ctx.request_repaint();
             }
         });
+    }
+
+    fn refresh_network(&mut self) {
+        self.shield.net_loading = true;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::Network(
+                orbit_core::network::connections().map_err(|e| e.to_string()),
+            ));
+            ctx.request_repaint();
+        });
+    }
+
+    pub(super) fn on_network(&mut self, r: Result<Vec<orbit_core::network::Connection>, String>) {
+        self.shield.net_loading = false;
+        match r {
+            Ok(v) => {
+                self.shield.net = v;
+                self.shield.net_err = None;
+            }
+            Err(e) => self.shield.net_err = Some(e),
+        }
+    }
+
+    fn network_tab(&mut self, ui: &mut egui::Ui, ask: &mut Option<String>) {
+        ui.horizontal(|ui| {
+            if ui.button("Refresh").clicked()
+                || (self.shield.net.is_empty()
+                    && !self.shield.net_loading
+                    && self.shield.net_err.is_none())
+            {
+                self.refresh_network();
+            }
+            if self.shield.net_loading {
+                ui.spinner();
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.shield.net_filter)
+                    .hint_text("Filter by app or address")
+                    .desired_width(200.0),
+            );
+            let established = self
+                .shield
+                .net
+                .iter()
+                .filter(|c| c.state.to_uppercase().starts_with("ESTAB"))
+                .count();
+            ui.label(RichText::new(format!("{established} active connections")).color(theme::DIM));
+        });
+        if let Some(e) = &self.shield.net_err {
+            ui.colored_label(theme::WARN, e);
+        }
+        let q = self.shield.net_filter.to_lowercase();
+        let rows: Vec<orbit_core::network::Connection> = self
+            .shield
+            .net
+            .iter()
+            .filter(|c| {
+                q.is_empty() || c.process.to_lowercase().contains(&q) || c.remote.contains(&q)
+            })
+            .filter(|c| c.remote_ip().is_some() || c.state.to_uppercase().contains("LISTEN"))
+            .cloned()
+            .collect();
+        let mut block: Option<String> = None;
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            egui::Grid::new("net").num_columns(5).striped(true).show(ui, |ui| {
+                for h in ["App", "Protocol", "Remote address", "State", ""] {
+                    ui.label(RichText::new(h).small().color(theme::DIM));
+                }
+                ui.end_row();
+                for c in &rows {
+                    ui.label(if c.process.is_empty() { c.pid.map(|p| format!("pid {p}")).unwrap_or_default() } else { c.process.clone() });
+                    ui.label(&c.proto);
+                    ui.label(RichText::new(if c.remote.is_empty() { c.local.clone() } else { c.remote.clone() }).monospace().small());
+                    ui.label(RichText::new(&c.state).small());
+                    ui.horizontal(|ui| {
+                        if let Some(ip) = c.remote_ip() {
+                            if ui.small_button("Block").on_hover_text("Block outgoing traffic to this address (asks for your password)").clicked() {
+                                block = Some(ip.clone());
+                            }
+                            if ui.small_button("Ask Claude").clicked() {
+                                *ask = Some(format!(
+                                    "Orbit Shield's network view shows the program '{}' (pid {:?}) connected to {} over {} ({}). \
+                                     Is this normal? What is it likely to be, and should I block it?",
+                                    c.process, c.pid, c.remote, c.proto, c.state
+                                ));
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Block adds a firewall rule using your system's own password prompt.")
+                .small()
+                .color(theme::DIM),
+        );
+        if let Some(ip) = block {
+            if let Some(cmd) = orbit_core::network::block_command(&ip) {
+                self.pending_run = Some(cmd);
+            }
+        }
     }
 
     pub(super) fn on_realtime(&mut self, found: Vec<Finding>) {
@@ -190,11 +333,12 @@ impl Desktop {
         let mut update = false;
         let mut save_cfg = false;
 
-        egui::Window::new(RichText::new("Orbit Shield").color(theme::SHIELD_GREEN))
-            .id(egui::Id::new("shield_win"))
+        if !self.wm_visible(WinId::Shield) {
+            self.confirm_delete_dialog(ctx);
+            return;
+        }
+        self.wm_window(WinId::Shield, RichText::new("Orbit Shield").color(theme::SHIELD_GREEN), [744.0, 44.0, 600.0, 400.0])
             .open(&mut open)
-            .default_size([600.0, 400.0])
-            .default_pos([744.0, 44.0])
             .show(ctx, |ui| {
                 // Status header.
                 ui.horizontal(|ui| {
@@ -203,7 +347,7 @@ impl Desktop {
                     ui.vertical(|ui| {
                         let threats = self.shield.findings.iter().filter(|f| f.severity >= Severity::Medium).count();
                         let (text, col) = if self.shield.scanning {
-                            ("Scanning…".to_string(), theme::ACCENT)
+                            ("Scanning…".to_string(), theme::accent())
                         } else if threats > 0 {
                             (format!("{threats} threat(s) need attention"), theme::BAD)
                         } else if !self.shield.findings.is_empty() {
@@ -214,16 +358,17 @@ impl Desktop {
                         ui.label(RichText::new(text).size(20.0).strong().color(col));
                         ui.label(
                             RichText::new(format!(
-                                "Orbit engine: {} signature(s) + heuristics · {}",
+                                "Orbit engine: {} signature(s) + heuristics · {} · {}",
                                 self.shield.signatures,
-                                self.shield.clamav.clone().unwrap_or_else(|| "ClamAV not installed".into())
+                                self.shield.clamav.clone().unwrap_or_else(|| "ClamAV not installed".into()),
+                                if self.shield.yara { "YARA rules" } else { "no YARA" }
                             ))
                             .color(theme::DIM),
                         );
                     });
                 });
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut self.cfg.shield_watch, "Real-time watch (Downloads, Desktop)").changed() {
+                    if ui.checkbox(&mut self.cfg.shield_watch, "Real-time watch").on_hover_text("Checks new files in Downloads and Desktop as soon as they arrive").changed() {
                         save_cfg = true;
                     }
                     if ui.checkbox(&mut self.cfg.use_clamav, "Use ClamAV").changed() {
@@ -241,6 +386,7 @@ impl Desktop {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.shield.tab, ShieldTab::Scan, "Scan");
                     ui.selectable_value(&mut self.shield.tab, ShieldTab::Quarantine, format!("Quarantine ({})", self.shield.quarantine.len()));
+                    ui.selectable_value(&mut self.shield.tab, ShieldTab::Network, "Network");
                 });
                 ui.separator();
 
@@ -315,6 +461,7 @@ impl Desktop {
                             }
                         });
                     }
+                    ShieldTab::Network => self.network_tab(ui, &mut ask),
                     ShieldTab::Quarantine => {
                         ui.label(RichText::new("Quarantined files are encoded so they can't run. Restore puts a file back exactly where it was.").color(theme::DIM));
                         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
@@ -344,9 +491,6 @@ impl Desktop {
         self.win.shield = open;
 
         if save_cfg {
-            if self.cfg.shield_watch && self.shield.watcher.is_none() {
-                self.shield.watcher = Some(Watcher::new(antivirus::watch_paths()));
-            }
             let _ = self.cfg.save();
         }
         if let Some(t) = scan {

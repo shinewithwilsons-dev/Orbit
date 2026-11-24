@@ -79,6 +79,7 @@ pub struct ScanReport {
 pub struct ScanOptions {
     pub max_file_size: u64,
     pub use_clamav: bool,
+    pub use_yara: bool,
 }
 
 impl Default for ScanOptions {
@@ -86,6 +87,7 @@ impl Default for ScanOptions {
         Self {
             max_file_size: 150 * 1024 * 1024,
             use_clamav: true,
+            use_yara: true,
         }
     }
 }
@@ -499,9 +501,135 @@ pub fn scan(
                 .push(format!("ClamAV not installed: {}", clamav_install_hint())),
         }
     }
+    if opts.use_yara && !report.cancelled {
+        if let Some(bin) = find_yara() {
+            let rules = yara_rule_files();
+            if !rules.is_empty() {
+                match yara_scan(&bin, &rules, targets) {
+                    Ok(found) => {
+                        report.findings.extend(found);
+                        report
+                            .notes
+                            .push(format!("YARA: {} rule file(s) checked", rules.len()));
+                    }
+                    Err(e) => report.notes.push(format!("YARA: {e}")),
+                }
+            }
+        }
+    }
     report.findings.sort_by(|a, b| b.severity.cmp(&a.severity));
     report.duration = start.elapsed();
     report
+}
+
+// --------------------------------------------------------------- YARA ----
+// YARA (github.com/VirusTotal/yara) matches malware patterns. Put `.yar`
+// rule files in the rules folder (OrbitOS adds a starter set).
+
+pub fn find_yara() -> Option<PathBuf> {
+    crate::exec::which("yara").or_else(|| crate::exec::which("yara64"))
+}
+
+pub fn yara_rules_dir() -> PathBuf {
+    crate::Config::path().with_file_name("yara")
+}
+
+const STARTER_RULES: &str = r#"// OrbitOS starter YARA rules. Add your own .yar files to this folder.
+rule OrbitOS_Ransom_Note
+{
+    meta:
+        description = "Text typical of ransomware notes"
+    strings:
+        $a = "your files have been encrypted" nocase
+        $b = "bitcoin" nocase
+        $c = "decrypt" nocase
+        $d = "private key" nocase
+    condition:
+        $a and 2 of ($b, $c, $d)
+}
+
+rule OrbitOS_Office_AutoOpen_Shell
+{
+    meta:
+        description = "Office macro that runs a shell command when opened"
+    strings:
+        $auto1 = "AutoOpen" nocase
+        $auto2 = "Document_Open" nocase
+        $auto3 = "Workbook_Open" nocase
+        $sh1 = "WScript.Shell" nocase
+        $sh2 = "Shell(" nocase
+        $sh3 = "powershell" nocase
+    condition:
+        any of ($auto*) and any of ($sh*)
+}
+"#;
+
+/// Rule files in the rules folder (creating the starter set if empty).
+pub fn yara_rule_files() -> Vec<PathBuf> {
+    let dir = yara_rules_dir();
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("orbitos-starter.yar"), STARTER_RULES);
+    }
+    std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some("yar") | Some("yara")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn yara_scan(bin: &Path, rules: &[PathBuf], targets: &[PathBuf]) -> Result<Vec<Finding>> {
+    let mut out = Vec::new();
+    for t in targets {
+        let o = Command::new(bin)
+            .args(["-r", "-w"])
+            .args(rules)
+            .arg(t)
+            .output()
+            .context("could not run yara")?;
+        if !o.status.success() && o.stdout.is_empty() {
+            bail!(
+                "{}",
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("yara failed")
+            );
+        }
+        out.extend(parse_yara_output(&String::from_utf8_lossy(&o.stdout)));
+    }
+    Ok(out)
+}
+
+/// `RuleName /path/to/file` lines.
+pub fn parse_yara_output(text: &str) -> Vec<Finding> {
+    text.lines()
+        .filter_map(|l| {
+            let (rule, path) = l.trim().split_once(' ')?;
+            Some(Finding {
+                path: PathBuf::from(path.trim()),
+                threat: format!("YARA.{rule}"),
+                engine: "YARA".into(),
+                severity: Severity::Medium,
+                detail: "matched a YARA rule".into(),
+            })
+        })
+        .collect()
+}
+
+/// True when today's scheduled quick scan should run now.
+pub fn scheduled_scan_due(cfg: &crate::Config, local_hour: u32) -> bool {
+    cfg.scheduled_scan
+        && crate::today() > cfg.last_scheduled_scan_day
+        && local_hour >= cfg.scan_hour as u32
 }
 
 // ------------------------------------------------------------- ClamAV ----
@@ -821,6 +949,7 @@ mod tests {
         std::fs::write(d.join("ok.txt"), "fine").unwrap();
         let opts = ScanOptions {
             use_clamav: false,
+            use_yara: false,
             ..Default::default()
         };
         let r = scan(&[d.clone()], &opts, &AtomicBool::new(false), &mut |_, _| {});
@@ -855,6 +984,23 @@ mod tests {
         assert_eq!(f.len(), 2);
         assert_eq!(f[0].threat, "Win.Trojan.Agent-123");
         assert_eq!(f[1].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn parses_yara() {
+        let f = parse_yara_output("OrbitOS_Ransom_Note /home/a/README.txt\n");
+        assert_eq!(f[0].threat, "YARA.OrbitOS_Ransom_Note");
+        assert_eq!(f[0].path, PathBuf::from("/home/a/README.txt"));
+    }
+
+    #[test]
+    fn schedule() {
+        let mut c = crate::Config::default();
+        c.scan_hour = 9;
+        assert!(scheduled_scan_due(&c, 10));
+        assert!(!scheduled_scan_due(&c, 8));
+        c.last_scheduled_scan_day = crate::today();
+        assert!(!scheduled_scan_due(&c, 23));
     }
 
     #[test]

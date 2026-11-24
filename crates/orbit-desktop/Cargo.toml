@@ -14,8 +14,46 @@ orbit-core = { path = "../orbit-core", default-features = false }
 eframe.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde.workspace = true
+serde_json.workspace = true
 
 [features]
-default = ["audio"]
+default = ["audio", "voice"]
 # In-app music playback (needs ALSA headers on Linux to build).
 audio = ["orbit-core/audio"]
+# Microphone input for voice control.
+voice = ["orbit-core/voice"]
+
+# Installers: `cargo packager --release -p orbit-desktop --formats <list>`
+# Windows: nsis (setup.exe) and wix (.msi) · macOS: app, dmg · Linux: deb, appimage
+[package.metadata.packager]
+product-name = "OrbitOS"
+identifier = "com.orbitos.desktop"
+description = "Rust desktop environment with Claude built in"
+authors = ["OrbitOS contributors"]
+publisher = "OrbitOS"
+category = "Utility"
+out-dir = "../../dist"
+before-packaging-command = "cargo build --release --workspace"
+icons = [
+  "../../packaging/icons/icon-32.png",
+  "../../packaging/icons/icon-128.png",
+  "../../packaging/icons/icon-256.png",
+  "../../packaging/icons/icon-512.png",
+  "../../packaging/icons/icon.icns",
+  "../../packaging/icons/icon.ico",
+]
+binaries = [
+  { path = "orbit-desktop", main = true },
+  { path = "orbit", main = false },
+]
+
+[package.metadata.packager.deb]
+depends = ["libxkbcommon0", "libgl1", "libasound2t64 | libasound2", "xdg-utils"]
+section = "x11"
+# Adds "OrbitOS" to the login screen's session list.
+files = { "../../packaging/orbitos.desktop" = "usr/share/xsessions/orbitos.desktop" }
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"

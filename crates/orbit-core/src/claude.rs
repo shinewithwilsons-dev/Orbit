@@ -9,13 +9,13 @@ use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -48,9 +48,10 @@ Be concise and practical. When the user wants something done on their computer, 
 propose the exact command inside a fenced code block tagged `run`, for example:\n\
 ```run\n<one command for {shell}>\n```\n\
 OrbitOS always asks the user to confirm before running anything. Never propose \
-destructive commands (deleting, formatting, overwriting) without saying so plainly.",
+destructive commands (deleting, formatting, overwriting) without saying so plainly.\n\n{actions}",
         os = crate::host_os(),
         shell = crate::host_shell(),
+        actions = crate::actions::tool_guide(),
     )
 }
 
@@ -62,6 +63,7 @@ pub fn ask(cfg: &Config, history: &[Message], on_chunk: &mut dyn FnMut(&str)) ->
     }
     match cfg.resolved_backend() {
         BackendKind::Api => ask_api(cfg, history, on_chunk),
+        BackendKind::Local => ask_local(cfg, history, on_chunk),
         _ => ask_cli(cfg, history, on_chunk),
     }
 }
@@ -70,6 +72,14 @@ pub fn ask(cfg: &Config, history: &[Message], on_chunk: &mut dyn FnMut(&str)) ->
 pub fn backend_status(cfg: &Config) -> String {
     match cfg.resolved_backend() {
         BackendKind::Api => format!("API · {}", cfg.model),
+        BackendKind::Local => format!(
+            "Local · {}",
+            if cfg.local_model.is_empty() {
+                "auto model"
+            } else {
+                cfg.local_model.as_str()
+            }
+        ),
         _ => "Claude Code CLI".to_string(),
     }
 }
@@ -231,6 +241,146 @@ fn ask_api(cfg: &Config, history: &[Message], on_chunk: &mut dyn FnMut(&str)) ->
         }
     }
     Ok(full)
+}
+
+// -------------------------------------------------------------- Local ----
+// Any OpenAI-compatible server: vLLM (`vllm serve <model>`), Ollama,
+// LM Studio, llama.cpp server.
+
+fn local_base(cfg: &Config) -> String {
+    cfg.local_url.trim_end_matches('/').to_string()
+}
+
+fn local_request(cfg: &Config, method: &str, path: &str) -> ureq::Request {
+    let mut r = ureq::request(method, &format!("{}{path}", local_base(cfg)))
+        .timeout(std::time::Duration::from_secs(600));
+    if let Some(k) = cfg.local_api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+        r = r.set("Authorization", &format!("Bearer {k}"));
+    }
+    r
+}
+
+/// Models the local server offers (`GET /v1/models`).
+pub fn list_local_models(cfg: &Config) -> Result<Vec<String>> {
+    let v: serde_json::Value = local_request(cfg, "GET", "/models")
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .with_context(|| format!("can't reach {}", cfg.local_url))?
+        .into_json()?;
+    Ok(v["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn local_model(cfg: &Config) -> Result<String> {
+    if !cfg.local_model.trim().is_empty() {
+        return Ok(cfg.local_model.trim().to_string());
+    }
+    list_local_models(cfg)?
+        .into_iter()
+        .next()
+        .context("the local server didn't list any models")
+}
+
+fn ask_local(cfg: &Config, history: &[Message], on_chunk: &mut dyn FnMut(&str)) -> Result<String> {
+    let model = local_model(cfg)?;
+    let mut messages = vec![serde_json::json!({"role": "system", "content": system_prompt()})];
+    messages.extend(
+        history
+            .iter()
+            .filter(|m| !m.content.trim().is_empty())
+            .map(|m| {
+                serde_json::json!({
+                    "role": match m.role { Role::User => "user", Role::Assistant => "assistant" },
+                    "content": m.content,
+                })
+            }),
+    );
+    let body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_tokens": cfg.max_tokens,
+        "stream": true,
+    });
+    let resp = match local_request(cfg, "POST", "/chat/completions").send_json(body) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            bail!(
+                "local server error {code}: {}",
+                r.into_string().unwrap_or_default()
+            )
+        }
+        Err(e) => bail!("can't reach the local server at {}: {e}", cfg.local_url),
+    };
+    let mut full = String::new();
+    for line in BufReader::new(resp.into_reader()).lines() {
+        let line = line?;
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
+            on_chunk(t);
+            full.push_str(t);
+        }
+    }
+    Ok(full)
+}
+
+/// Generate an image on the local server (`POST /v1/images/generations`).
+/// Saves it to Pictures/OrbitOS and returns the path.
+pub fn generate_image(cfg: &Config, prompt: &str) -> Result<std::path::PathBuf> {
+    let mut body = serde_json::json!({
+        "prompt": prompt,
+        "n": 1,
+        "size": "1024x1024",
+        "response_format": "b64_json",
+    });
+    if !cfg.image_model.trim().is_empty() {
+        body["model"] = serde_json::json!(cfg.image_model.trim());
+    }
+    let v: serde_json::Value = match local_request(cfg, "POST", "/images/generations").send_json(body) {
+        Ok(r) => r.into_json()?,
+        Err(ureq::Error::Status(code, r)) => bail!(
+            "image generation failed ({code}): {}. Your server needs an OpenAI-style /v1/images/generations endpoint.",
+            r.into_string().unwrap_or_default()
+        ),
+        Err(e) => bail!("can't reach {}: {e}", cfg.local_url),
+    };
+    let item = &v["data"][0];
+    let bytes = if let Some(b64) = item["b64_json"].as_str() {
+        crate::b64_decode(b64).context("bad image data")?
+    } else if let Some(url) = item["url"].as_str() {
+        let mut buf = Vec::new();
+        ureq::get(url).call()?.into_reader().read_to_end(&mut buf)?;
+        buf
+    } else {
+        bail!("the server returned no image");
+    };
+    let dir = dirs::picture_dir()
+        .or_else(|| dirs::home_dir().map(|h| h.join("Pictures")))
+        .unwrap_or_else(|| ".".into())
+        .join("OrbitOS");
+    std::fs::create_dir_all(&dir)?;
+    let name = format!(
+        "{} {}.png",
+        crate::office::safe_name(&prompt.chars().take(40).collect::<String>()),
+        crate::now_secs()
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, bytes)?;
+    Ok(path)
 }
 
 // ------------------------------------------------------------ helpers ----

@@ -104,11 +104,11 @@ impl Desktop {
         let mut open_doc: Option<PathBuf> = None;
         let mut to_pdf: Option<PathBuf> = None;
         let mut draft = false;
-        egui::Window::new(RichText::new("Office").color(theme::OFFICE_BLUE))
-            .id(egui::Id::new("office_win"))
+        if !self.wm_visible(WinId::Office) {
+            return;
+        }
+        self.wm_window(WinId::Office, RichText::new("Office").color(theme::OFFICE_BLUE), [744.0, 300.0, 600.0, 420.0])
             .open(&mut open)
-            .default_size([600.0, 420.0])
-            .default_pos([744.0, 300.0])
             .show(ctx, |ui| {
                 match &self.office.soffice {
                     Some(p) => {

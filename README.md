@@ -11,166 +11,200 @@ session, so it boots straight into OrbitOS.
 
 ![OrbitOS desktop](docs/screenshot.png)
 
+## Highlights
+
+| | |
+|---|---|
+| **Claude that acts** | Ask Claude to organise files, scan folders, write documents, play music or change the theme. Every action is an Approve/Deny card. |
+| **Your own AI server** | Switch between the Claude Code CLI, the Anthropic API, and your **vLLM** (or Ollama / LM Studio) server. Generate images with `/image`. |
+| **Voice** | Push-to-talk (Mic button or hold F9) and **"Hey Orbit"**, transcribed offline by whisper.cpp, with spoken replies. |
+| **Command bar** | Ctrl/Cmd+Space: apps, files, music, settings, maths, or ask Claude, all in one box. |
+| **Orbit Shield** | Antivirus: Orbit engine + ClamAV + YARA, on-arrival protection, daily scans, quarantine, network view with one-click firewall blocks. |
+| **Media** | In-app music with album art, equaliser and playlists. Videos in mpv/VLC, internet radio (50,000+ stations), and your **BeMusic** site. |
+| **Office** | LibreOffice integration, PDF conversion, and Claude-written Word documents. |
+| **Desktop** | Clickable icons, folder views, snap and maximise, minimise to dock, 4 virtual desktops, remembered window positions. |
+| **Look** | 5 themes, custom accent colour, animated wallpapers (starfield, warp, planet, aurora) or your own picture. |
+| **Notifications & widgets** | Clock, calendar, weather, now playing, system and Shield status, plus a notification history. |
+| **App Store** | One-click installs of 30 free apps (FreeCAD, Blender, KiCad, Stellarium, GIMP…) via winget, Homebrew or Flatpak/apt. |
+| **Backup & sync** | Encrypted backups (Argon2 + AES-256-GCM) to OneDrive / iCloud / Dropbox / Google Drive. |
+| **First-run welcome** | Connect Claude, install the free tools, pick a look, and run a first scan. |
+| **Installers** | Windows setup.exe and .msi, macOS .dmg, Linux .deb and AppImage, built by GitHub Actions. |
+
+| Claude actions | Command bar |
+|---|---|
+| ![Claude actions](docs/claude-actions.png) | ![Command bar](docs/command-bar.png) |
+| **App Store, widgets & calendar** | **First-run welcome** |
+| ![App Store](docs/app-store.png) | ![Welcome](docs/welcome.png) |
+
 ## What's inside
 
 | Crate | Binary | What it does |
 |---|---|---|
-| `orbit-core` | library | Settings, Claude backends, system info, app discovery, files, command execution |
-| `orbit-shell` | `orbit` | Terminal shell: built-ins, Claude chat, `do` tasks, passthrough to the host shell |
-| `orbit-desktop` | `orbit-desktop` | GUI desktop: clickable desktop icons, top bar, dock, and Files / Terminal / Claude / Orbit Shield / Media / Office / Monitor / Settings windows |
+| `orbit-core` | library | Settings, Claude/vLLM backends, actions, Orbit Shield, media, radio, office, voice, search, weather, network, store, backup |
+| `orbit-shell` | `orbit` | Terminal shell: Claude chat with action approvals, scans, media, office, store, backup, calculator |
+| `orbit-desktop` | `orbit-desktop` | The graphical desktop |
 
-### Orbit Shield: built-in antivirus
-Two engines work together:
-- **Orbit engine** (built in, pure Rust): SHA-256 signatures (add your own in
-  `signatures.txt` next to the config file, one `sha256 name` per line), the
-  EICAR test file, file-name tricks (`photo.jpg.exe`, right-to-left override),
-  and script heuristics (ransomware commands that delete backups,
-  download-and-run, hidden or encoded PowerShell).
-- **ClamAV** (open source, [github.com/Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav)):
-  used automatically when installed. **Update signatures** runs `freshclam`.
-
-Features: quick and full scans, scanning any file or folder (right-click in
-Files), **real-time watch** of Downloads and Desktop, **quarantine** (files
-are encoded so they can't run, and can be restored), and **Ask Claude** on
-every finding for a plain-English explanation and advice.
-
-### Media
-- **Music** plays inside OrbitOS (MP3, FLAC, WAV, OGG, Opus, M4A/AAC) with
-  play/pause, next/previous, seek and volume, from your Music and Downloads folders.
-- **Video** plays in **mpv** ([github.com/mpv-player/mpv](https://github.com/mpv-player/mpv)),
-  the leading free open-source player, with **VLC** as a fallback.
-
-### Office
-Uses **LibreOffice** ([github.com/LibreOffice/core](https://github.com/LibreOffice/core)), the free
-open-source office suite: new documents, spreadsheets, presentations and
-drawings, recent files, one-click **Convert to PDF**, and **Write with
-Claude**. You describe a document, Claude writes it, and it's saved as a real
-`.docx`, `.odt` or `.pdf` in `Documents/OrbitOS` and opened in LibreOffice.
-
-### Claude integration (switchable)
+## Claude and your own AI
 
 | Backend | How it connects | Key stored? |
 |---|---|---|
-| **cli** (default) | Pipes the conversation to your signed-in Claude Code CLI (`claude -p`) | No |
-| **api** | Streams from the Anthropic Messages API | Yes (`ANTHROPIC_API_KEY` or Settings) |
+| **cli** (default) | Your signed-in Claude Code CLI (`claude -p`) | No |
+| **api** | Anthropic Messages API, streamed | Yes (`ANTHROPIC_API_KEY` or Settings) |
+| **local** | Your **vLLM** server or any OpenAI-compatible API (Ollama, LM Studio, llama.cpp) | Optional |
 | **auto** | API if a key exists, otherwise CLI | – |
 
-Switch in **Settings**, or run `backend cli|api|auto` in the shell.
+For vLLM, run `vllm serve <model>` and set the URL in **Settings → Claude & AI**
+(default `http://localhost:8000/v1`). **Test connection** lists the server's models.
+`/image <description>` in the Claude window (or Claude's `generate_image`
+action) calls your server's `/v1/images/generations` endpoint and saves the
+picture to `Pictures/OrbitOS`.
 
-Claude knows which OS and folder you're in. When it suggests a command, the
-command appears with a **Run** button (desktop) or a `Run it? [y/N]` prompt
-(shell). **Nothing runs until you confirm.**
+### Actions with approval
+Claude proposes actions in ```` ```action ```` blocks. OrbitOS shows each one as a
+card, colour-coded by risk (safe / changes files / runs a command), and does
+nothing until you press **Approve** (or **Approve all**). With
+**Auto-continue** on, results go back to Claude so it can carry on, for
+example listing a folder and then suggesting what to move.
+
+Tools: `run_command`, `open_app`, `open_path`, `list_folder`, `make_folder`,
+`move_file`, `copy_file`, `write_file` (new files only), `scan`,
+`quarantine`, `play_media`, `create_document`, `generate_image`, `set_theme`,
+`set_wallpaper`, `notify`. **There is no delete tool**, and moves and copies
+never overwrite existing files.
+
+## Voice
+1. Install whisper.cpp (App Store, `brew install whisper-cpp`, or build from
+   [github.com/ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp)).
+2. Download a model (e.g. `ggml-base.en.bin`) into the folder shown in
+   **Settings → Voice** (button: *Open models folder*).
+3. Click **Mic** on the top bar or hold **F9** to talk. Turn on **"Hey Orbit"** to
+   speak hands-free. **Speak replies** reads Claude's answers aloud using your
+   OS's voice (Windows Speech, macOS `say`, or `espeak-ng` on Linux).
+
+Speech never leaves your computer for transcription.
+
+## Orbit Shield
+- **Orbit engine** (pure Rust): SHA-256 signatures (your own in
+  `signatures.txt`), EICAR test file, disguised files (`photo.jpg.exe`,
+  right-to-left override), and script heuristics (ransomware commands,
+  download-and-run, hidden PowerShell).
+- **ClamAV** ([Cisco-Talos/clamav](https://github.com/Cisco-Talos/clamav)): millions of
+  signatures; **Update signatures** runs `freshclam`.
+- **YARA** ([VirusTotal/yara](https://github.com/VirusTotal/yara)): pattern rules from the
+  rules folder (a starter set detects ransom notes and auto-running Office macros).
+- **On-arrival protection**: OS file events (inotify / FSEvents /
+  ReadDirectoryChangesW) check new downloads as soon as they finish.
+- **Daily scheduled quick scan** at the hour you choose.
+- **Quarantine**: files are encoded so they can't run, and can be restored.
+- **Network**: which apps are connected where, **Block** (firewall rule via your
+  OS's own password prompt), and **Ask Claude** about any connection or finding.
+
+## Media
+- **Music** in OrbitOS: MP3, FLAC, WAV, OGG, Opus, M4A/AAC with **album art**,
+  artist/album, seek, volume, a **3-band equaliser** with presets, and **playlists** (.m3u).
+- **Video** in **mpv** ([mpv-player/mpv](https://github.com/mpv-player/mpv)), falling back to VLC.
+- **Radio**: SomaFM space channels plus search of 50,000+ stations (radio-browser.info).
+- **BeMusic**: connect your site's URL and API token in **Settings → Media** to
+  search and stream your own library. *(Beta: tested against BeMusic's search
+  API format. Tell me if your version answers differently.)*
+
+## Office
+**LibreOffice** ([LibreOffice/core](https://github.com/LibreOffice/core)): new documents,
+spreadsheets, presentations and drawings, recent files, **Convert to PDF**, and
+**Write with Claude**: you describe a document and get a real `.docx`/`.odt`/`.pdf`.
 
 ## Install
 
+### Installers
+Push a tag (`git tag v0.3.0 && git push --tags`) and the **Release installers**
+workflow builds and attaches:
+- **Windows**: `OrbitOS_0.3.0_x64-setup.exe` (NSIS) and `.msi` (WiX)
+- **macOS**: `OrbitOS_0.3.0_aarch64.dmg`
+- **Linux**: `orbit-desktop_0.3.0_amd64.deb` and `.AppImage`
+
+The `.deb` also adds **OrbitOS** to your login screen's session list.
+
+### From source
 1. Install Rust: <https://rustup.rs>
-2. Recommended free tools (OrbitOS works without them and tells you what's missing):
+2. Linux only: `sudo apt install libxkbcommon-dev libgl1-mesa-dev libasound2-dev`
+   · Windows only: Visual Studio Build Tools ("Desktop development with C++")
+3. `cargo build --release` → `target/release/orbit` and `target/release/orbit-desktop`
+4. Build installers yourself: `cargo install cargo-packager --locked`, then
+   `cargo packager --release -p orbit-desktop --formats deb` (or `nsis,wix` / `dmg`).
 
-   | | Windows | macOS | Linux (Debian/Ubuntu) |
-   |---|---|---|---|
-   | ClamAV | `winget install Cisco.ClamAV` | `brew install clamav` | `sudo apt install clamav` |
-   | mpv | `winget install mpv` | `brew install mpv` | `sudo apt install mpv` |
-   | LibreOffice | `winget install TheDocumentFoundation.LibreOffice` | `brew install --cask libreoffice` | `sudo apt install libreoffice` |
+Optional features: build with `--no-default-features` to leave out in-app
+audio (`audio`) and microphone support (`voice`).
 
-   Then run `freshclam` once (or click **Update signatures** in Orbit Shield).
-3. For the CLI backend, install Claude Code and sign in once:
-   ```
-   npm install -g @anthropic-ai/claude-code
-   claude
-   ```
-4. Build:
-   ```
-   cargo build --release
-   ```
-   The binaries are in `target/release/`: `orbit` and `orbit-desktop`
-   (`.exe` on Windows).
+### Free tools (or use the App Store / welcome tour)
 
-### Platform notes
-- **Linux**: needs X11 or Wayland, plus OpenGL (Mesa) and ALSA headers for
-  music playback: `sudo apt install libxkbcommon-dev libgl1-mesa-dev libasound2-dev`.
-  To build without in-app music: `cargo build --release -p orbit-desktop --no-default-features`
-  (music then opens in mpv).
-- **macOS**: works out of the box. Run `cargo build --release` in Terminal.
-- **Windows**: install the "Desktop development with C++" workload from the
-  Visual Studio Build Tools (Rust's MSVC toolchain needs it).
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` | same | same |
+| ClamAV | `winget install Cisco.ClamAV` | `brew install clamav` | `sudo apt install clamav` |
+| YARA | `winget install VirusTotal.YARA` | `brew install yara` | `sudo apt install yara` |
+| mpv | `winget install mpv.net` | `brew install mpv` | `sudo apt install mpv` |
+| LibreOffice | `winget install TheDocumentFoundation.LibreOffice` | `brew install --cask libreoffice` | `sudo apt install libreoffice` |
+| whisper.cpp | GitHub releases | `brew install whisper-cpp` | build from source |
 
-## Use
+## Shortcuts
 
-### Desktop
+| Keys (Cmd on macOS) | Does |
+|---|---|
+| Ctrl+Space or Alt+Space | Command bar |
+| Ctrl+K | Claude |
+| F9 (hold) | Push-to-talk |
+| Ctrl+Alt+← / → | Snap window left / right (add Shift for top quarters) |
+| Ctrl+Alt+↑ / ↓ | Maximise / restore |
+| Ctrl+Alt+M | Minimise to dock |
+| Ctrl+Alt+1-4 | Switch desktop (add Shift to move the window) |
+
+Right-click any dock button for minimise, maximise, snap and move-to-desktop.
+
+## Desktop options
 ```
-orbit-desktop              # windowed
-orbit-desktop --fullscreen # takes over the screen, like an OS
-orbit-desktop --show-all   # open Files, Shield and Media at start
-orbit-desktop --open=office,claude   # choose which windows open
+orbit-desktop --fullscreen           # take over the screen, like an OS
+orbit-desktop --open=claude,media    # open windows at start
+orbit-desktop --center               # open notifications & widgets
+orbit-desktop --search=hull          # open the command bar with a search
+orbit-desktop --ask="what's using my CPU?"
 ```
-- **Desktop icons**: click to select, double-click (or Enter) to open
-- **Files** shows folders as icons (or a list). Double-click opens folders,
-  plays media and opens documents. Right-click gives Claude, Orbit Shield,
-  Media and Office actions
-- **Ctrl/Cmd + Space**: app launcher (searches your installed apps on every OS)
-- **Ctrl/Cmd + K**: Claude
-- In Files, right-click a file and choose **Ask Claude about this file**
-- In Terminal, type `? question` to send it to Claude
-- **Send system info** sends live CPU, memory and disk stats to Claude for a health check
 
-### Shell
+## Shell
 ```
 orbit                      # interactive
 orbit ? what's using my RAM
 ```
 | Command | Does |
 |---|---|
-| `? <question>` | Chat with Claude (it remembers the conversation) |
-| `do <task>` | Claude writes the command; you confirm |
-| `explain <file>` | Claude explains a file |
-| `ls cd pwd cat open` | File basics |
-| `scan [path]` | Orbit Shield scan; quarantine or ask Claude per finding |
-| `quarantine` · `restore <id>` · `update-av` | Manage quarantine and ClamAV signatures |
-| `music` · `videos` · `play <file>` | Media library and playback (mpv/VLC) |
-| `office new <kind>` · `office open <file>` · `pdf <file>` | LibreOffice |
-| `draft <topic>` | Claude writes a document, saved as .docx |
-| `sys ps kill apps launch` | System and apps |
-| `backend model key config` | Settings |
+| `? <question>` / `do <task>` | Chat with Claude; approve its commands and actions |
+| `backend cli\|api\|local\|auto` · `local-url <url>` | Choose how Claude/AI is reached |
+| `scan [path]` · `quarantine` · `restore <id>` · `update-av` | Orbit Shield |
+| `music` · `videos` · `play <file>` · `radio [search]` | Media |
+| `office new <kind>` · `pdf <file>` · `draft <topic>` · `image <prompt>` | Office & images |
+| `install [name]` · `backup` · `= <maths>` | App store, backup, calculator |
 | anything else | Runs in cmd.exe / sh |
 
-## Make it your session on Linux (boot into OrbitOS)
-```
-sudo cp target/release/orbit-desktop /usr/local/bin/
-sudo cp packaging/orbitos.desktop /usr/share/xsessions/
-```
-Log out, pick **OrbitOS** on the login screen, and it starts fullscreen.
+## Where things are saved
+- Settings: `~/.config/orbitos/config.toml` (Linux), `~/Library/Application Support/orbitos/` (macOS), `%APPDATA%\orbitos\` (Windows)
+- Chats, playlists, window layout, quarantine: OrbitOS's local data folder
+- Backups: the folder you choose in **Settings → Backup & sync**
 
-## Settings file
-- Linux: `~/.config/orbitos/config.toml`
-- macOS: `~/Library/Application Support/orbitos/config.toml`
-- Windows: `%APPDATA%\orbitos\config.toml`
-
-```toml
-backend = "cli"            # cli | api | auto
-model = "claude-sonnet-5-5"
-max_tokens = 4096
-fullscreen = false
-# api_key = "..."          # optional; ANTHROPIC_API_KEY takes priority
-# cli_path = "/path/to/claude"
-```
-A saved API key is stored in plain text. An environment variable is safer.
+A saved API key is stored in plain text in the settings file. An environment
+variable is safer, and backups without a password always leave keys out.
 
 ## Develop
 ```
-cargo test --workspace
+cargo test --workspace     # 54 core tests
 cargo run -p orbit-desktop
-cargo run -p orbit-shell
+cargo run -p orbit-core --example local_ai -- http://localhost:8000/v1
 ```
-GitHub Actions (`.github/workflows/ci.yml`) builds and tests on Windows,
-macOS and Linux.
+CI (`.github/workflows/ci.yml`) tests on Windows, macOS and Linux; the release
+workflow builds the installers.
 
 ## Roadmap ideas
-- Claude tool use: file edits and app control with per-action approval
-- Orbit Shield: on-access scanning via OS file events, scheduled scans, YARA rules
 - Embedded video (libmpv) inside the Media window
-- Window manager mode on Linux (Wayland compositor via `smithay`)
-- Notifications, clipboard history, a settings sync
-- Voice input
-- Plugins (WASM) for third-party widgets
+- Wayland compositor mode on Linux (`smithay`)
+- Calendar sync and clipboard history
+- WASM plugins for third-party widgets
 
 MIT licensed.

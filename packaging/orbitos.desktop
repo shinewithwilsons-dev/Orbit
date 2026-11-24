@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=OrbitOS
 Comment=Rust desktop environment with Claude built in
-Exec=/usr/local/bin/orbit-desktop --fullscreen
+Exec=orbit-desktop --fullscreen
 Type=Application
 DesktopNames=OrbitOS

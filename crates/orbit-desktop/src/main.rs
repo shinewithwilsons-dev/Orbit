@@ -20,6 +20,17 @@ fn main() -> eframe::Result<()> {
     if fullscreen {
         viewport = viewport.with_fullscreen(true);
     }
+    // App icon (taskbar / dock / window title).
+    if let Ok(img) =
+        image::load_from_memory(include_bytes!("../../../packaging/icons/icon-256.png"))
+    {
+        let img = img.to_rgba8();
+        viewport = viewport.with_icon(eframe::egui::IconData {
+            width: img.width(),
+            height: img.height(),
+            rgba: img.into_raw(),
+        });
+    }
 
     let options = eframe::NativeOptions {
         viewport,
@@ -29,7 +40,7 @@ fn main() -> eframe::Result<()> {
         "OrbitOS",
         options,
         Box::new(move |cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, &cfg);
             Box::new(app::Desktop::new(cfg, cc.egui_ctx.clone()))
         }),
     )

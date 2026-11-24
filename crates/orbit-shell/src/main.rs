@@ -132,6 +132,38 @@ impl Shell {
             "pdf" => office::convert(&self.resolve(rest), "pdf")
                 .map(|p| println!("Saved {}", p.display())),
             "draft" => self.draft(rest),
+            "image" => claude::generate_image(&self.cfg, rest).map(|p| {
+                println!("Saved {}", p.display());
+                let _ = exec::open(&p.to_string_lossy());
+            }),
+            "local-url" => {
+                self.cfg.local_url = rest.to_string();
+                self.cfg
+                    .save()
+                    .map(|_| println!("Local server set to {rest}"))
+            }
+            "install" => self.install(rest),
+            "backup" => {
+                let pw = self
+                    .editor
+                    .readline("Backup password (empty = no encryption, secrets left out): ")
+                    .unwrap_or_default();
+                let dir = orbit_core::backup::suggested_dirs()
+                    .into_iter()
+                    .next()
+                    .map(|(_, p)| p)
+                    .unwrap_or_else(|| ".".into());
+                orbit_core::backup::create(&dir, pw.trim())
+                    .map(|p| println!("Saved {}", p.display()))
+            }
+            "calc" | "=" => match orbit_core::calc::eval(rest) {
+                Some(v) => {
+                    println!("{}", orbit_core::calc::format(v));
+                    Ok(())
+                }
+                None => Err(anyhow::anyhow!("couldn't work that out")),
+            },
+            "radio" => self.radio(rest),
             "cd" => self.cd(rest),
             "pwd" => {
                 println!("{}", self.cwd.display());
@@ -248,20 +280,74 @@ impl Shell {
                 }
             }
         }
+        // Claude actions: approve each one.
+        let mut results = Vec::new();
+        for a in orbit_core::actions::extract(reply) {
+            match a {
+                Ok(action) => {
+                    println!(
+                        "\n{BOLD}Claude wants to:{RESET} {CYAN}{}{RESET}  {}",
+                        action.title(),
+                        action.detail()
+                    );
+                    let answer = self.editor.readline("Approve? [y/N] ").unwrap_or_default();
+                    if answer.trim().eq_ignore_ascii_case("y") {
+                        let out = orbit_core::actions::execute(&action, &self.cfg, &self.cwd);
+                        println!("{}{}{RESET}", if out.ok { DIM } else { RED }, out.message);
+                        results.push(format!(
+                            "- {}: {} -> {}",
+                            action.title(),
+                            action.detail(),
+                            out.message
+                        ));
+                    } else {
+                        results.push(format!(
+                            "- {}: {} -> declined",
+                            action.title(),
+                            action.detail()
+                        ));
+                    }
+                }
+                Err(e) => println!("{RED}{e}{RESET}"),
+            }
+        }
+        if !results.is_empty() {
+            let more = self
+                .editor
+                .readline("Send the results back to Claude? [Y/n] ")
+                .unwrap_or_default();
+            if !more.trim().eq_ignore_ascii_case("n") {
+                let reply = self.stream(format!(
+                    "Results of the actions I approved:\n{}",
+                    results.join("\n")
+                ))?;
+                return self.offer_commands(&reply);
+            }
+        }
         Ok(())
     }
 
     fn backend(&mut self, arg: &str) -> anyhow::Result<()> {
         if arg.is_empty() {
             println!(
-                "Backend: {} (resolved: {}). Options: cli | api | auto",
+                "Backend: {} (resolved: {}). Options: cli | api | local | auto",
                 self.cfg.backend.label(),
                 claude::backend_status(&self.cfg)
             );
             return Ok(());
         }
-        let kind =
-            BackendKind::parse(arg).ok_or_else(|| anyhow::anyhow!("use cli, api or auto"))?;
+        let kind = BackendKind::parse(arg)
+            .ok_or_else(|| anyhow::anyhow!("use cli, api, local or auto"))?;
+        if kind == BackendKind::Local {
+            match claude::list_local_models(&self.cfg) {
+                Ok(m) => println!(
+                    "{DIM}Local server {} has: {}{RESET}",
+                    self.cfg.local_url,
+                    m.join(", ")
+                ),
+                Err(e) => println!("{DIM}Warning: {e} (set the URL with `local-url <url>`){RESET}"),
+            }
+        }
         if kind == BackendKind::Api && self.cfg.effective_api_key().is_none() {
             println!("{DIM}No API key yet: run `key` or set ANTHROPIC_API_KEY.{RESET}");
         }
@@ -457,6 +543,71 @@ impl Shell {
         Ok(())
     }
 
+    fn radio(&mut self, query: &str) -> anyhow::Result<()> {
+        let st = if query.is_empty() {
+            orbit_core::radio::featured()
+        } else {
+            orbit_core::radio::search(query)?
+        };
+        for (i, s) in st.iter().take(15).enumerate() {
+            println!(
+                "{:>3}. {BOLD}{}{RESET} {DIM}{}{RESET}",
+                i + 1,
+                s.name,
+                s.info
+            );
+        }
+        let pick = self
+            .editor
+            .readline("Play which number? ")
+            .unwrap_or_default();
+        if let Some(s) = pick
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| st.get(n.wrapping_sub(1)))
+        {
+            media::play_external(&[std::path::PathBuf::from(&s.url)])?;
+            println!("Playing {} in your media player.", s.name);
+        }
+        Ok(())
+    }
+
+    fn install(&mut self, name: &str) -> anyhow::Result<()> {
+        let catalog = orbit_core::store::catalog();
+        if name.is_empty() {
+            for a in &catalog {
+                let mark = if orbit_core::store::is_installed(a) {
+                    "\x1b[32minstalled\x1b[0m"
+                } else {
+                    ""
+                };
+                println!("  {BOLD}{:<14}{RESET} {:<58} {mark}", a.name, a.about);
+            }
+            println!("{DIM}install <name> to install one{RESET}");
+            return Ok(());
+        }
+        let app = catalog
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                anyhow::anyhow!("no app called '{name}' (type `install` for the list)")
+            })?;
+        let cmd = orbit_core::store::install_command(app)
+            .ok_or_else(|| anyhow::anyhow!("no package for this system: see {}", app.homepage))?;
+        println!("{BOLD}Will run:{RESET} {CYAN}{cmd}{RESET}");
+        if self
+            .editor
+            .readline("Install? [y/N] ")
+            .unwrap_or_default()
+            .trim()
+            .eq_ignore_ascii_case("y")
+        {
+            self.passthrough(&cmd)?;
+        }
+        Ok(())
+    }
+
     fn draft(&mut self, topic: &str) -> anyhow::Result<()> {
         if topic.is_empty() {
             anyhow::bail!("usage: draft <what the document should be>");
@@ -646,6 +797,12 @@ fn help() {
   music [filter]  videos [filter]  play <file>      (mpv / VLC)
   office [new <writer|calc|impress|draw> | open <file>]   pdf <file>
   draft <topic>     Claude writes it, saved as a Word document
+  radio [search]    internet radio · image <prompt> (local server)
+{BOLD}Apps & backup{RESET}
+  install [name]    free app store (winget / Homebrew / Flatpak / apt)
+  backup            encrypted backup of settings, chats and playlists
+  = <maths>         calculator, e.g. `= 3e8 / 1000`
+  local-url <url>   your vLLM / OpenAI-compatible server (then `backend local`)
 {BOLD}System{RESET}
   sys   ps   kill <pid>   apps [filter]   launch <app>
 {BOLD}Other{RESET}

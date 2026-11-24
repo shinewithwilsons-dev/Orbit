@@ -13,6 +13,37 @@ pub(super) enum WinId {
     Office,
     Monitor,
     Settings,
+    Store,
+}
+
+impl WinId {
+    pub fn name(self) -> &'static str {
+        match self {
+            WinId::Files => "files",
+            WinId::Terminal => "terminal",
+            WinId::Claude => "claude",
+            WinId::Shield => "shield",
+            WinId::Media => "media",
+            WinId::Office => "office",
+            WinId::Monitor => "monitor",
+            WinId::Settings => "settings",
+            WinId::Store => "store",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WinId::Files => "Files",
+            WinId::Terminal => "Terminal",
+            WinId::Claude => "Claude",
+            WinId::Shield => "Shield",
+            WinId::Media => "Media",
+            WinId::Office => "Office",
+            WinId::Monitor => "Monitor",
+            WinId::Settings => "Settings",
+            WinId::Store => "App Store",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +90,7 @@ pub(super) fn default_icons() -> Vec<DesktopIcon> {
     v.push(app("Orbit Shield", Glyph::Shield, WinId::Shield));
     v.push(app("Media", Glyph::Media, WinId::Media));
     v.push(app("Office", Glyph::Office, WinId::Office));
+    v.push(app("App Store", Glyph::Apps, WinId::Store));
     v.push(app("Monitor", Glyph::Monitor, WinId::Monitor));
     v.push(app("Settings", Glyph::Settings, WinId::Settings));
     v.push(DesktopIcon {
@@ -105,7 +137,9 @@ impl Desktop {
             WinId::Office => self.open_office(),
             WinId::Monitor => self.win.monitor = true,
             WinId::Settings => self.win.settings = true,
+            WinId::Store => self.open_store(),
         }
+        self.wm_show(w);
     }
 
     pub(super) fn run_icon(&mut self, action: IconAction) {

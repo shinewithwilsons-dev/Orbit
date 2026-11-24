@@ -2,18 +2,26 @@
 
 use crate::theme;
 use eframe::egui::{self, Color32, RichText};
-use orbit_core::{
-    apps, claude, exec, files, human_bytes, system, BackendKind, Config, Message, Role,
-};
+use orbit_core::{apps, claude, exec, files, human_bytes, system, Config, Message, Role};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+mod center;
+mod claude_ui;
+mod cmdbar;
 mod files_ui;
 mod icons;
 mod media_ui;
 mod office_ui;
+mod settings_ui;
 mod shield;
+mod store_ui;
+mod voice_ui;
+mod welcome;
+mod wm;
+
+use icons::WinId;
 
 enum Event {
     ClaudeChunk(String),
@@ -27,6 +35,16 @@ enum Event {
     MediaLibrary(Vec<orbit_core::media::Item>, Vec<orbit_core::media::Item>),
     OfficeMsg(Result<String, String>),
     DraftDone(Result<PathBuf, String>),
+    ActionDone(usize, usize, orbit_core::actions::Outcome),
+    ImageDone(Result<PathBuf, String>),
+    Weather(Result<orbit_core::weather::Weather, String>),
+    Transcript(voice_ui::Purpose, Result<String, String>),
+    StoreChecked(std::collections::HashSet<&'static str>),
+    LocalModels(Result<Vec<String>, String>),
+    BackupDone(Result<String, String>, bool),
+    Network(Result<Vec<orbit_core::network::Connection>, String>),
+    RadioResults(Result<Vec<orbit_core::radio::Station>, String>),
+    BeMusicResults(Result<Vec<orbit_core::radio::RemoteTrack>, String>),
 }
 
 #[derive(Default)]
@@ -40,6 +58,7 @@ struct Windows {
     shield: bool,
     media: bool,
     office: bool,
+    store: bool,
 }
 
 pub struct Desktop {
@@ -92,6 +111,19 @@ pub struct Desktop {
     shield: shield::ShieldState,
     media: media_ui::MediaState,
     office: office_ui::OfficeState,
+
+    // OrbitOS 0.3: window manager, command bar, notifications, voice, …
+    wm: wm::Wm,
+    desk_rect: egui::Rect,
+    claude: claude_ui::ClaudeState,
+    cmd: cmdbar::CmdBar,
+    center: center::CenterState,
+    voice: voice_ui::VoiceState,
+    store: store_ui::StoreState,
+    welcome: welcome::WelcomeState,
+    settings: settings_ui::SettingsState,
+    settings_tab: settings_ui::Tab,
+    wallpaper_tex: Option<egui::TextureHandle>,
 }
 
 impl Desktop {
@@ -130,6 +162,7 @@ impl Desktop {
                     shield: has("shield"),
                     media: has("media"),
                     office: has("office"),
+                    store: has("store"),
                     about: false,
                 }
             },
@@ -164,7 +197,46 @@ impl Desktop {
             shield: shield::ShieldState::new(false),
             media: media_ui::MediaState::new(),
             office: office_ui::OfficeState::new(),
+            wm: wm::Wm::load(),
+            desk_rect: egui::Rect::from_min_size(egui::pos2(0.0, 30.0), egui::vec2(1360.0, 780.0)),
+            claude: claude_ui::ClaudeState {
+                auto_continue: true,
+                ..Default::default()
+            },
+            cmd: cmdbar::CmdBar::default(),
+            center: center::CenterState::default(),
+            voice: voice_ui::VoiceState::new(),
+            store: store_ui::StoreState::default(),
+            welcome: welcome::WelcomeState::default(),
+            settings: settings_ui::SettingsState::default(),
+            settings_tab: settings_ui::Tab::Claude,
+            wallpaper_tex: None,
         };
+        d.chat = Self::load_current_chat();
+        d.welcome.open = !d.cfg.onboarded
+            && !std::env::args().any(|a| a.starts_with("--open=") || a == "--show-all");
+        d.start_file_index();
+        d.refresh_store();
+        if d.cfg.wallpaper == "image" {
+            d.load_wallpaper_image();
+        }
+        // Windows asked for on the command line appear on the current desktop.
+        for k in wm::MANAGED {
+            if *d.win_flag(k) {
+                d.wm_show(k);
+            }
+        }
+        // Start-up options: --center, --search=<text>, --ask=<text>
+        for arg in std::env::args() {
+            if arg == "--center" {
+                d.center.open = true;
+            } else if let Some(q) = arg.strip_prefix("--search=") {
+                d.open_cmdbar();
+                d.cmd.query = q.to_string();
+            } else if let Some(q) = arg.strip_prefix("--ask=") {
+                d.send_to_claude(q.to_string());
+            }
+        }
         d.refresh_files();
         if d.win.media {
             d.open_media();
@@ -189,11 +261,23 @@ impl Desktop {
                 }
                 Event::ClaudeDone(Ok(text)) => {
                     self.streaming = None;
+                    if self.cfg.speak_replies {
+                        self.speak(&text);
+                    }
+                    if !self.wm_visible(WinId::Claude) || !self.win.claude {
+                        let preview: String = claude_ui::strip_action_blocks(&text)
+                            .chars()
+                            .take(90)
+                            .collect();
+                        self.push_note("Claude replied", &preview);
+                    }
                     self.chat.push(Message::assistant(text));
+                    self.save_chat();
                 }
                 Event::ClaudeDone(Err(e)) => {
                     self.streaming = None;
                     self.chat.push(Message::assistant(format!("Error: {e}")));
+                    self.save_chat();
                 }
                 Event::Term(s) => self.term_log.push_str(&s),
                 Event::TermDone => self.term_busy = false,
@@ -220,10 +304,74 @@ impl Desktop {
                     self.office.recent = orbit_core::office::recent_documents(25);
                 }
                 Event::DraftDone(r) => self.on_draft_done(r),
+                Event::ActionDone(m, c, out) => self.on_action_done(m, c, out),
+                Event::ImageDone(r) => {
+                    self.claude.generating_image = false;
+                    match r {
+                        Ok(p) => self.apply_effect(orbit_core::actions::UiEffect::ShowImage(p)),
+                        Err(e) => self.push_note("Image generation", &e),
+                    }
+                }
+                Event::Weather(r) => {
+                    self.center.weather_loading = false;
+                    match r {
+                        Ok(w) => {
+                            self.center.weather = Some(w);
+                            self.center.weather_err = None;
+                        }
+                        Err(e) => self.center.weather_err = Some(e),
+                    }
+                }
+                Event::Transcript(p, r) => self.on_transcript(p, r),
+                Event::StoreChecked(set) => {
+                    self.store.installed = set;
+                    self.store.checking = false;
+                    self.store.checked = true;
+                }
+                Event::LocalModels(r) => match r {
+                    Ok(models) => {
+                        self.settings.local_status =
+                            Some(format!("Connected: {} model(s)", models.len()));
+                        self.settings.local_models = models;
+                    }
+                    Err(e) => self.settings.local_status = Some(format!("Failed: {e}")),
+                },
+                Event::BackupDone(r, quiet) => match r {
+                    Ok(p) => {
+                        self.settings.backup_status = Some(format!("Saved {p}"));
+                        if !quiet {
+                            self.push_note("Backup complete", &p);
+                        }
+                    }
+                    Err(e) => {
+                        self.settings.backup_status = Some(format!("Backup failed: {e}"));
+                        self.push_note("Backup failed", &e);
+                    }
+                },
+                Event::Network(r) => self.on_network(r),
+                Event::RadioResults(r) => {
+                    self.media.radio_loading = false;
+                    match r {
+                        Ok(v) => self.media.radio_results = v,
+                        Err(e) => self.notify(e),
+                    }
+                }
+                Event::BeMusicResults(r) => {
+                    self.media.be_loading = false;
+                    match r {
+                        Ok(v) => {
+                            self.media.be_results = v;
+                            self.media.be_err = None;
+                        }
+                        Err(e) => self.media.be_err = Some(e),
+                    }
+                }
             }
         }
         self.shield_tick();
         self.media_tick();
+        self.weather_tick();
+        self.backup_tick();
         if self.last_sample.elapsed() > Duration::from_millis(1500) {
             self.snap = self.monitor.snapshot(12);
             self.last_sample = Instant::now();
@@ -236,7 +384,10 @@ impl Desktop {
         if text.trim().is_empty() || self.streaming.is_some() {
             return;
         }
-        self.win.claude = true;
+        if !self.win.claude {
+            self.win.claude = true;
+            self.wm_show(WinId::Claude);
+        }
         self.chat.push(Message::user(text));
         self.streaming = Some(String::new());
         let cfg = self.cfg.clone();
@@ -369,10 +520,33 @@ impl Desktop {
 impl eframe::App for Desktop {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump();
-        ctx.request_repaint_after(Duration::from_millis(500));
+        self.voice_tick(ctx);
+        let animated = self.cfg.animate_wallpaper && theme::is_animated(&self.cfg.wallpaper);
+        ctx.request_repaint_after(Duration::from_millis(if animated { 50 } else { 500 }));
+
+        // Keyboard shortcuts.
+        let (cmd_space, alt_space, cmd_k) = ctx.input(|i| {
+            (
+                i.modifiers.command && !i.modifiers.alt && i.key_pressed(egui::Key::Space),
+                i.modifiers.alt && !i.modifiers.command && i.key_pressed(egui::Key::Space),
+                i.modifiers.command && i.key_pressed(egui::Key::K),
+            )
+        });
+        if cmd_space || alt_space {
+            if self.cmd.open {
+                self.cmd.open = false;
+            } else {
+                self.open_cmdbar();
+            }
+        }
+        if cmd_k {
+            self.open_win(WinId::Claude);
+        }
+        self.wm_shortcuts(ctx);
 
         self.top_bar(ctx);
         self.dock(ctx);
+        self.center_panel(ctx);
         if self.show_launcher {
             self.launcher(ctx);
         }
@@ -381,15 +555,23 @@ impl eframe::App for Desktop {
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
-                theme::paint_wallpaper(ui.painter(), rect, ctx.input(|i| i.time));
-                // Watermark in the middle of the desktop.
-                ui.painter().text(
-                    rect.center() - egui::vec2(0.0, 30.0),
-                    egui::Align2::CENTER_CENTER,
-                    "OrbitOS",
-                    egui::FontId::proportional(60.0),
-                    Color32::from_white_alpha(40),
+                self.desk_rect = rect;
+                theme::paint_wallpaper(
+                    ui.painter(),
+                    rect,
+                    ctx.input(|i| i.time),
+                    &self.cfg,
+                    self.wallpaper_tex.as_ref(),
                 );
+                if self.cfg.wallpaper != "image" {
+                    ui.painter().text(
+                        rect.center() - egui::vec2(0.0, 30.0),
+                        egui::Align2::CENTER_CENTER,
+                        "OrbitOS",
+                        egui::FontId::proportional(60.0),
+                        Color32::from_white_alpha(36),
+                    );
+                }
                 self.desktop_icons(ui, rect);
                 // Quick-ask box near the bottom; text kept in egui memory between frames.
                 let bar = egui::Rect::from_center_size(
@@ -402,7 +584,7 @@ impl eframe::App for Desktop {
                     let r2 = ui.add(
                         egui::TextEdit::singleline(&mut stored)
                             .hint_text(format!(
-                                "Ask Claude anything… ({})",
+                                "Ask Claude anything… ({}) · Ctrl+Space to search",
                                 claude::backend_status(&self.cfg)
                             ))
                             .desired_width(480.0),
@@ -413,6 +595,15 @@ impl eframe::App for Desktop {
                     }
                     ui.data_mut(|d| d.insert_temp(id, stored));
                 });
+                if self.wm.desktop > 0 {
+                    ui.painter().text(
+                        rect.right_bottom() - egui::vec2(16.0, 60.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        format!("Desktop {}", self.wm.desktop + 1),
+                        egui::FontId::proportional(14.0),
+                        Color32::from_white_alpha(120),
+                    );
+                }
             });
 
         self.files_window(ctx);
@@ -424,16 +615,19 @@ impl eframe::App for Desktop {
         self.shield_window(ctx);
         self.media_window(ctx);
         self.office_window(ctx);
+        self.store_window(ctx);
+        self.wm_track(ctx);
+        self.welcome_ui(ctx);
         self.confirm_run(ctx);
+        self.cmdbar_ui(ctx);
         self.toast_ui(ctx);
+    }
 
-        // Keyboard shortcuts.
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Space)) {
-            self.show_launcher = !self.show_launcher;
-        }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
-            self.win.claude = true;
-        }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.wm.save();
+        self.save_chat();
+        self.media.stream.stop();
+        let _ = self.cfg.save();
     }
 }
 
@@ -445,37 +639,86 @@ impl Desktop {
             .exact_height(30.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    ui.menu_button(
+                        RichText::new("OrbitOS").strong().color(theme::accent()),
+                        |ui| {
+                            if ui.button("Search  (Ctrl+Space)").clicked() {
+                                self.open_cmdbar();
+                                ui.close_menu();
+                            }
+                            if ui.button("Installed apps").clicked() {
+                                self.show_launcher = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("App Store").clicked() {
+                                self.open_win(WinId::Store);
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Settings").clicked() {
+                                self.open_win(WinId::Settings);
+                                ui.close_menu();
+                            }
+                            if ui.button("System Monitor").clicked() {
+                                self.open_win(WinId::Monitor);
+                                ui.close_menu();
+                            }
+                            if ui.button("Welcome tour").clicked() {
+                                self.welcome.open = true;
+                                self.welcome.step = 0;
+                                ui.close_menu();
+                            }
+                            if ui.button("About OrbitOS").clicked() {
+                                self.win.about = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Quit OrbitOS").clicked() {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        },
+                    );
                     if ui
-                        .button(RichText::new("OrbitOS").strong().color(theme::ACCENT))
+                        .add(
+                            egui::Button::new(RichText::new("Search…").color(theme::DIM))
+                                .frame(false),
+                        )
+                        .on_hover_text("Command bar: Ctrl+Space")
                         .clicked()
                     {
-                        self.show_launcher = !self.show_launcher;
+                        self.open_cmdbar();
                     }
-                    ui.menu_button("System", |ui| {
-                        if ui.button("Settings").clicked() {
-                            self.win.settings = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("System Monitor").clicked() {
-                            self.win.monitor = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("About OrbitOS").clicked() {
-                            self.win.about = true;
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("Quit OrbitOS").clicked() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
+                    ui.separator();
+                    self.mic_button(ui);
+                    if !self.voice.status.is_empty() && self.voice.mode != voice_ui::Mode::Idle {
+                        ui.label(RichText::new(&self.voice.status).small().color(theme::DIM));
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let bell = if self.center.unread > 0 {
+                            format!("Alerts {}", self.center.unread)
+                        } else {
+                            "Alerts".to_string()
+                        };
+                        let col = if self.center.unread > 0 {
+                            theme::WARN
+                        } else {
+                            ui.visuals().text_color()
+                        };
+                        if ui
+                            .add(egui::Button::new(RichText::new(bell).color(col)).frame(false))
+                            .on_hover_text("Notifications and widgets")
+                            .clicked()
+                        {
+                            self.center.open = !self.center.open;
+                        }
                         ui.label(
                             RichText::new(
                                 chrono::Local::now().format("%a %d %b  %H:%M").to_string(),
                             )
                             .strong(),
                         );
+                        ui.separator();
+                        self.desktop_switcher(ui);
                         ui.separator();
                         let threats = self
                             .shield
@@ -484,7 +727,7 @@ impl Desktop {
                             .filter(|f| f.severity >= orbit_core::antivirus::Severity::Medium)
                             .count();
                         let (shield_text, shield_col) = if self.shield.scanning {
-                            ("Shield: scanning".to_string(), theme::ACCENT)
+                            ("Shield: scanning".to_string(), theme::accent())
                         } else if threats > 0 {
                             (format!("Shield: {threats} threat(s)"), theme::BAD)
                         } else {
@@ -497,7 +740,7 @@ impl Desktop {
                             )
                             .clicked()
                         {
-                            self.win.shield = true;
+                            self.open_win(WinId::Shield);
                         }
                         ui.separator();
                         let busy = self.streaming.is_some();
@@ -530,40 +773,23 @@ impl Desktop {
             .exact_height(46.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let total = 10.0 * 104.0;
+                    let total = 10.0 * 100.0;
                     ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                    let item = |ui: &mut egui::Ui, label: &str, open: &mut bool| {
-                        let text = if *open {
-                            RichText::new(label).strong().color(theme::ACCENT)
-                        } else {
-                            RichText::new(label)
-                        };
-                        if ui
-                            .add_sized([96.0, 32.0], egui::Button::new(text))
-                            .clicked()
-                        {
-                            *open = !*open;
-                        }
+                    let apps = if self.show_launcher {
+                        RichText::new("Apps").strong().color(theme::accent())
+                    } else {
+                        RichText::new("Apps")
                     };
-                    let mut launcher = self.show_launcher;
-                    item(ui, "Apps", &mut launcher);
-                    self.show_launcher = launcher;
-                    item(ui, "Files", &mut self.win.files);
-                    item(ui, "Terminal", &mut self.win.terminal);
-                    item(ui, "Claude", &mut self.win.claude);
-                    item(ui, "Shield", &mut self.win.shield);
-                    let was_media = self.win.media;
-                    item(ui, "Media", &mut self.win.media);
-                    if self.win.media && !was_media {
-                        self.open_media();
+                    if ui
+                        .add_sized([92.0, 32.0], egui::Button::new(apps))
+                        .on_hover_text("Installed apps")
+                        .clicked()
+                    {
+                        self.show_launcher = !self.show_launcher;
                     }
-                    let was_office = self.win.office;
-                    item(ui, "Office", &mut self.win.office);
-                    if self.win.office && !was_office {
-                        self.open_office();
+                    for k in wm::MANAGED {
+                        self.dock_item(ui, k);
                     }
-                    item(ui, "Monitor", &mut self.win.monitor);
-                    item(ui, "Settings", &mut self.win.settings);
                 });
             });
     }
@@ -613,10 +839,11 @@ impl Desktop {
 
     fn terminal_window(&mut self, ctx: &egui::Context) {
         let mut open = self.win.terminal;
-        egui::Window::new("Terminal")
+        if !self.wm_visible(WinId::Terminal) {
+            return;
+        }
+        self.wm_window(WinId::Terminal, "Terminal", [680.0, 500.0, 640.0, 260.0])
             .open(&mut open)
-            .default_size([640.0, 260.0])
-            .default_pos([680.0, 500.0])
             .show(ctx, |ui| {
                 let input_h = 34.0;
                 egui::ScrollArea::vertical()
@@ -629,7 +856,7 @@ impl Desktop {
                         );
                     });
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("›").monospace().color(theme::ACCENT));
+                    ui.label(RichText::new("›").monospace().color(theme::accent()));
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.term_input)
                             .font(egui::TextStyle::Monospace)
@@ -650,182 +877,117 @@ impl Desktop {
         self.win.terminal = open;
     }
 
-    fn claude_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.win.claude;
-        egui::Window::new(RichText::new("Claude").color(theme::CLAUDE))
-            .id(egui::Id::new("claude_win"))
-            .open(&mut open)
-            .default_size([640.0, 380.0])
-            .default_pos([680.0, 48.0])
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(claude::backend_status(&self.cfg)).color(theme::DIM));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("New chat").clicked() && self.streaming.is_none() {
-                            self.chat.clear();
-                        }
-                        if ui.small_button("Send system info").clicked() {
-                            let s = self.snap.summary();
-                            self.send_to_claude(format!("Here is my system status. Anything I should know or fix?\n\n{s}"));
-                        }
-                    });
-                });
-                ui.separator();
-                let input_h = 70.0;
-                let mut run: Option<String> = None;
-                egui::ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .auto_shrink([false; 2])
-                    .max_height(ui.available_height() - input_h)
-                    .show(ui, |ui| {
-                        if self.chat.is_empty() {
-                            ui.label(RichText::new(
-                                "Ask about your files, your system, code, or anything else.\n\
-                                 When Claude suggests a command you'll get a Run button, and nothing runs until you confirm.",
-                            ).color(theme::DIM));
-                        }
-                        for m in &self.chat {
-                            bubble(ui, m.role, &m.content);
-                            if m.role == Role::Assistant {
-                                for cmd in claude::extract_commands(&m.content) {
-                                    if ui.button(RichText::new(format!("▶ Run: {cmd}")).monospace()).clicked() {
-                                        run = Some(cmd);
-                                    }
-                                }
-                            }
-                        }
-                        if let Some(s) = &self.streaming {
-                            bubble(ui, Role::Assistant, if s.is_empty() { "…" } else { s });
-                        }
-                    });
-                if run.is_some() {
-                    self.pending_run = run;
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let r = ui.add(
-                        egui::TextEdit::multiline(&mut self.chat_input)
-                            .hint_text("Message Claude (Enter to send, Shift+Enter for a new line)")
-                            .desired_rows(2)
-                            .desired_width(ui.available_width() - 70.0),
-                    );
-                    let enter = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                    let send = ui.add_enabled(self.streaming.is_none(), egui::Button::new("Send")).clicked();
-                    if (enter || send) && self.streaming.is_none() {
-                        let text = std::mem::take(&mut self.chat_input).trim().to_string();
-                        self.send_to_claude(text);
-                    }
-                });
-            });
-        self.win.claude = open;
-    }
-
     fn monitor_window(&mut self, ctx: &egui::Context) {
         let mut open = self.win.monitor;
         let mut kill: Option<u32> = None;
-        egui::Window::new("System Monitor")
-            .open(&mut open)
-            .default_size([600.0, 300.0])
-            .default_pos([24.0, 440.0])
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        let s = &self.snap;
-                        ui.label(RichText::new(format!("{} · {}", s.os, s.host)).strong());
-                        ui.label(
-                            RichText::new(format!(
-                                "Kernel {} · up {} · {} processes",
-                                s.kernel,
-                                s.uptime_text(),
-                                s.proc_count
-                            ))
-                            .color(theme::DIM),
-                        );
-                        ui.label(RichText::new(&s.cpu_brand).color(theme::DIM));
-                        ui.add_space(4.0);
+        if !self.wm_visible(WinId::Monitor) {
+            return;
+        }
+        self.wm_window(
+            WinId::Monitor,
+            "System Monitor",
+            [224.0, 440.0, 600.0, 300.0],
+        )
+        .open(&mut open)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    let s = &self.snap;
+                    ui.label(RichText::new(format!("{} · {}", s.os, s.host)).strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "Kernel {} · up {} · {} processes",
+                            s.kernel,
+                            s.uptime_text(),
+                            s.proc_count
+                        ))
+                        .color(theme::DIM),
+                    );
+                    ui.label(RichText::new(&s.cpu_brand).color(theme::DIM));
+                    ui.add_space(4.0);
+                    meter(
+                        ui,
+                        "CPU",
+                        s.cpu_total / 100.0,
+                        format!("{:.0}%", s.cpu_total),
+                    );
+                    meter(
+                        ui,
+                        "Memory",
+                        s.mem_fraction(),
+                        format!("{} / {}", human_bytes(s.mem_used), human_bytes(s.mem_total)),
+                    );
+                    if s.swap_total > 0 {
                         meter(
                             ui,
-                            "CPU",
-                            s.cpu_total / 100.0,
-                            format!("{:.0}%", s.cpu_total),
+                            "Swap",
+                            s.swap_used as f32 / s.swap_total as f32,
+                            format!(
+                                "{} / {}",
+                                human_bytes(s.swap_used),
+                                human_bytes(s.swap_total)
+                            ),
                         );
-                        meter(
-                            ui,
-                            "Memory",
-                            s.mem_fraction(),
-                            format!("{} / {}", human_bytes(s.mem_used), human_bytes(s.mem_total)),
-                        );
-                        if s.swap_total > 0 {
+                    }
+                    ui.collapsing(format!("Cores ({})", s.cpu_cores.len()), |ui| {
+                        egui::Grid::new("cores").num_columns(4).show(ui, |ui| {
+                            for (i, c) in s.cpu_cores.iter().enumerate() {
+                                ui.add(
+                                    egui::ProgressBar::new(c / 100.0)
+                                        .desired_width(100.0)
+                                        .text(format!("{i}: {c:.0}%"))
+                                        .fill(theme::load_colour(c / 100.0)),
+                                );
+                                if i % 4 == 3 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    });
+                    ui.collapsing("Disks", |ui| {
+                        for d in &s.disks {
+                            let used = d.total.saturating_sub(d.available);
+                            let f = if d.total == 0 {
+                                0.0
+                            } else {
+                                used as f32 / d.total as f32
+                            };
                             meter(
                                 ui,
-                                "Swap",
-                                s.swap_used as f32 / s.swap_total as f32,
+                                &d.mount,
+                                f,
                                 format!(
-                                    "{} / {}",
-                                    human_bytes(s.swap_used),
-                                    human_bytes(s.swap_total)
+                                    "{} free of {}",
+                                    human_bytes(d.available),
+                                    human_bytes(d.total)
                                 ),
                             );
                         }
-                        ui.collapsing(format!("Cores ({})", s.cpu_cores.len()), |ui| {
-                            egui::Grid::new("cores").num_columns(4).show(ui, |ui| {
-                                for (i, c) in s.cpu_cores.iter().enumerate() {
-                                    ui.add(
-                                        egui::ProgressBar::new(c / 100.0)
-                                            .desired_width(100.0)
-                                            .text(format!("{i}: {c:.0}%"))
-                                            .fill(theme::load_colour(c / 100.0)),
-                                    );
-                                    if i % 4 == 3 {
-                                        ui.end_row();
-                                    }
-                                }
-                            });
-                        });
-                        ui.collapsing("Disks", |ui| {
-                            for d in &s.disks {
-                                let used = d.total.saturating_sub(d.available);
-                                let f = if d.total == 0 {
-                                    0.0
-                                } else {
-                                    used as f32 / d.total as f32
-                                };
-                                meter(
-                                    ui,
-                                    &d.mount,
-                                    f,
-                                    format!(
-                                        "{} free of {}",
-                                        human_bytes(d.available),
-                                        human_bytes(d.total)
-                                    ),
-                                );
+                    });
+                    ui.separator();
+                    ui.label(RichText::new("Top processes").strong());
+                    egui::Grid::new("procs")
+                        .striped(true)
+                        .num_columns(5)
+                        .show(ui, |ui| {
+                            for h in ["PID", "Name", "CPU", "Memory", ""] {
+                                ui.label(RichText::new(h).color(theme::DIM));
                             }
-                        });
-                        ui.separator();
-                        ui.label(RichText::new("Top processes").strong());
-                        egui::Grid::new("procs")
-                            .striped(true)
-                            .num_columns(5)
-                            .show(ui, |ui| {
-                                for h in ["PID", "Name", "CPU", "Memory", ""] {
-                                    ui.label(RichText::new(h).color(theme::DIM));
+                            ui.end_row();
+                            for p in &s.top_procs {
+                                ui.label(p.pid.to_string());
+                                ui.label(&p.name);
+                                ui.label(format!("{:.1}%", p.cpu));
+                                ui.label(human_bytes(p.memory));
+                                if ui.small_button("End").clicked() {
+                                    kill = Some(p.pid);
                                 }
                                 ui.end_row();
-                                for p in &s.top_procs {
-                                    ui.label(p.pid.to_string());
-                                    ui.label(&p.name);
-                                    ui.label(format!("{:.1}%", p.cpu));
-                                    ui.label(human_bytes(p.memory));
-                                    if ui.small_button("End").clicked() {
-                                        kill = Some(p.pid);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                    });
-            });
+                            }
+                        });
+                });
+        });
         self.win.monitor = open;
         if let Some(pid) = kill {
             self.pending_run = None;
@@ -836,100 +998,6 @@ impl Desktop {
                 format!("Could not end {pid}")
             });
         }
-    }
-
-    fn settings_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.win.settings;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .default_size([460.0, 380.0])
-            .show(ctx, |ui| {
-                ui.heading("Claude connection");
-                ui.radio_value(
-                    &mut self.cfg.backend,
-                    BackendKind::Cli,
-                    "Claude Code CLI: uses your signed-in `claude` (no key stored)",
-                );
-                ui.radio_value(
-                    &mut self.cfg.backend,
-                    BackendKind::Api,
-                    "Anthropic API: uses an API key",
-                );
-                ui.radio_value(
-                    &mut self.cfg.backend,
-                    BackendKind::Auto,
-                    "Auto: API if a key is available, otherwise CLI",
-                );
-                ui.label(
-                    RichText::new(format!("Now using: {}", claude::backend_status(&self.cfg)))
-                        .color(theme::ACCENT),
-                );
-                ui.add_space(6.0);
-                egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
-                    ui.label("API model");
-                    ui.text_edit_singleline(&mut self.cfg.model);
-                    ui.end_row();
-                    ui.label("Max tokens");
-                    ui.add(
-                        egui::DragValue::new(&mut self.cfg.max_tokens).clamp_range(256..=64_000),
-                    );
-                    ui.end_row();
-                    ui.label("API key");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.key_edit)
-                            .password(true)
-                            .hint_text("sk-ant-… (optional)"),
-                    );
-                    ui.end_row();
-                    ui.label("CLI path");
-                    let mut p = self.cfg.cli_path.clone().unwrap_or_default();
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut p).hint_text("auto-detect `claude`"))
-                        .changed()
-                    {
-                        self.cfg.cli_path = if p.trim().is_empty() { None } else { Some(p) };
-                    }
-                    ui.end_row();
-                });
-                if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-                    ui.label(
-                        RichText::new(
-                            "ANTHROPIC_API_KEY is set in the environment and takes priority.",
-                        )
-                        .color(theme::DIM),
-                    );
-                }
-                ui.label(
-                    RichText::new(format!(
-                        "A saved key is stored in plain text in {}",
-                        Config::path().display()
-                    ))
-                    .small()
-                    .color(theme::DIM),
-                );
-                ui.separator();
-                ui.checkbox(&mut self.cfg.fullscreen, "Start OrbitOS fullscreen");
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
-                        self.cfg.api_key = if self.key_edit.trim().is_empty() {
-                            None
-                        } else {
-                            Some(self.key_edit.trim().to_string())
-                        };
-                        match self.cfg.save() {
-                            Ok(()) => self.notify("Settings saved"),
-                            Err(e) => self.notify(format!("Save failed: {e}")),
-                        }
-                    }
-                    if ui.button("Test Claude").clicked() {
-                        self.send_to_claude(
-                            "Reply with one short sentence confirming you're connected to OrbitOS."
-                                .into(),
-                        );
-                    }
-                });
-            });
-        self.win.settings = open;
     }
 
     fn about_window(&mut self, ctx: &egui::Context) {
@@ -959,31 +1027,37 @@ impl Desktop {
             return;
         };
         let mut decision: Option<bool> = None;
-        egui::Window::new("Run this command?")
-            .collapsible(false)
-            .resizable(false)
+        egui::Area::new(egui::Id::new("confirm_run"))
+            .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Claude suggested:");
-                ui.add(
-                    egui::Label::new(RichText::new(&cmd).monospace().color(theme::WARN)).wrap(true),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "It will run in {} via {}.",
-                        self.term_cwd.display(),
-                        orbit_core::host_shell()
-                    ))
-                    .color(theme::DIM),
-                );
-                ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Run").strong()).clicked() {
-                        decision = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        decision = Some(false);
-                    }
-                });
+                egui::Frame::window(ui.style())
+                    .inner_margin(egui::Margin::same(14.0))
+                    .show(ui, |ui| {
+                        ui.set_max_width(520.0);
+                        ui.label(RichText::new("Run this command?").strong().size(16.0));
+                        ui.label("OrbitOS will run:");
+                        ui.add(
+                            egui::Label::new(RichText::new(&cmd).monospace().color(theme::WARN))
+                                .wrap(true),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "It will run in {} via {}.",
+                                self.term_cwd.display(),
+                                orbit_core::host_shell()
+                            ))
+                            .color(theme::DIM),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button(RichText::new("Run").strong()).clicked() {
+                                decision = Some(true);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                decision = Some(false);
+                            }
+                        });
+                    })
             });
         match decision {
             Some(true) => {
@@ -1014,7 +1088,7 @@ impl Desktop {
 
 fn bubble(ui: &mut egui::Ui, role: Role, text: &str) {
     let (who, col) = match role {
-        Role::User => ("You", theme::ACCENT),
+        Role::User => ("You", theme::accent()),
         Role::Assistant => ("Claude", theme::CLAUDE),
     };
     egui::Frame::group(ui.style()).show(ui, |ui| {
