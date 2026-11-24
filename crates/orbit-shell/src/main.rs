@@ -1,0 +1,459 @@
+//! `orbit`: the OrbitOS terminal. Built-in commands, Claude chat, and
+//! everything else passed through to the host shell.
+
+use orbit_core::{apps, claude, exec, files, human_bytes, system, BackendKind, Config, Message};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
+use std::io::Write;
+use std::path::PathBuf;
+
+const CYAN: &str = "\x1b[36m";
+const MAGENTA: &str = "\x1b[35m";
+const DIM: &str = "\x1b[2m";
+const BOLD: &str = "\x1b[1m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+struct Shell {
+    cfg: Config,
+    cwd: PathBuf,
+    chat: Vec<Message>,
+    monitor: system::Monitor,
+    apps: Option<Vec<apps::App>>,
+    editor: DefaultEditor,
+}
+
+fn main() -> anyhow::Result<()> {
+    // `orbit ask what is my IP` runs one command and exits.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut shell = Shell {
+        cfg: Config::load(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        chat: Vec::new(),
+        monitor: system::Monitor::new(),
+        apps: None,
+        editor: DefaultEditor::new()?,
+    };
+    if !args.is_empty() {
+        shell.dispatch(&args.join(" "));
+        return Ok(());
+    }
+
+    banner(&shell.cfg);
+    let history = Config::path().with_file_name("history.txt");
+    let _ = shell.editor.load_history(&history);
+
+    loop {
+        let prompt = format!(
+            "{CYAN}orbit{RESET}:{DIM}{}{RESET}> ",
+            short_path(&shell.cwd)
+        );
+        match shell.editor.readline(&prompt) {
+            Ok(line) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let _ = shell.editor.add_history_entry(line);
+                if matches!(line, "exit" | "quit" | "logout") {
+                    break;
+                }
+                shell.dispatch(line);
+            }
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("{RED}input error: {e}{RESET}");
+                break;
+            }
+        }
+    }
+    if let Some(dir) = history.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = shell.editor.save_history(&history);
+    Ok(())
+}
+
+fn banner(cfg: &Config) {
+    println!(
+        "{MAGENTA}{BOLD}\n   OrbitOS shell {}{RESET}  {DIM}on {} · Claude via {}{RESET}\n   {DIM}Type `help` for commands, `? <question>` to ask Claude.{RESET}\n",
+        env!("CARGO_PKG_VERSION"),
+        orbit_core::host_os(),
+        claude::backend_status(cfg),
+    );
+}
+
+fn short_path(p: &std::path::Path) -> String {
+    if let Some(home) = dirs_home() {
+        if let Ok(rest) = p.strip_prefix(&home) {
+            return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.display())
+                .trim_end_matches(std::path::MAIN_SEPARATOR)
+                .to_string();
+        }
+    }
+    p.display().to_string()
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+impl Shell {
+    fn dispatch(&mut self, line: &str) {
+        let (cmd, rest) = match line.split_once(char::is_whitespace) {
+            Some((c, r)) => (c, r.trim()),
+            None => (line, ""),
+        };
+        let result = match cmd {
+            "help" => {
+                help();
+                Ok(())
+            }
+            "?" | "ask" => self.ask(rest),
+            "do" => self.do_task(rest),
+            "explain" => self.explain(rest),
+            "forget" | "newchat" => {
+                self.chat.clear();
+                println!("{DIM}Conversation cleared.{RESET}");
+                Ok(())
+            }
+            "cd" => self.cd(rest),
+            "pwd" => {
+                println!("{}", self.cwd.display());
+                Ok(())
+            }
+            "ls" | "dir" if !rest.starts_with('-') => self.ls(rest),
+            "cat" if !rest.is_empty() && !rest.contains(' ') => self.cat(rest),
+            "sys" => {
+                print!("{}", self.monitor.snapshot(0).summary());
+                Ok(())
+            }
+            "ps" | "top" => self.ps(),
+            "kill" => self.kill(rest),
+            "apps" => self.list_apps(rest),
+            "launch" => self.launch(rest),
+            "open" => exec::open(if rest.is_empty() { "." } else { rest }),
+            "backend" => self.backend(rest),
+            "model" => self.model(rest),
+            "key" => self.set_key(),
+            "config" => {
+                println!("{}\n{}", Config::path().display(), toml_view(&self.cfg));
+                Ok(())
+            }
+            "clear" | "cls" => {
+                print!("\x1b[2J\x1b[H");
+                Ok(())
+            }
+            _ => self.passthrough(line),
+        };
+        if let Err(e) = result {
+            eprintln!("{RED}{e}{RESET}");
+        }
+    }
+
+    fn passthrough(&self, line: &str) -> anyhow::Result<()> {
+        let status = exec::run_interactive(line, &self.cwd)?;
+        if !status.success() {
+            println!("{DIM}exit: {status}{RESET}");
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------- Claude --
+
+    fn stream(&mut self, prompt: String) -> anyhow::Result<String> {
+        self.chat.push(Message::user(prompt));
+        println!(
+            "{MAGENTA}{BOLD}Claude{RESET} {DIM}({}){RESET}",
+            claude::backend_status(&self.cfg)
+        );
+        let _ = std::env::set_current_dir(&self.cwd);
+        let reply = claude::ask(&self.cfg, &self.chat, &mut |chunk| {
+            print!("{chunk}");
+            let _ = std::io::stdout().flush();
+        });
+        println!();
+        match reply {
+            Ok(text) => {
+                self.chat.push(Message::assistant(text.clone()));
+                Ok(text)
+            }
+            Err(e) => {
+                self.chat.pop();
+                Err(e)
+            }
+        }
+    }
+
+    fn ask(&mut self, q: &str) -> anyhow::Result<()> {
+        if q.is_empty() {
+            anyhow::bail!("usage: ? <question>");
+        }
+        let reply = self.stream(q.to_string())?;
+        self.offer_commands(&reply)
+    }
+
+    fn do_task(&mut self, task: &str) -> anyhow::Result<()> {
+        if task.is_empty() {
+            anyhow::bail!("usage: do <what you want done>");
+        }
+        let prompt = format!(
+            "Give me one {} command, run from {}, that does this: {task}\n\
+             Put the command in a ```run block, then one line explaining it.",
+            orbit_core::host_shell(),
+            self.cwd.display()
+        );
+        let reply = self.stream(prompt)?;
+        self.offer_commands(&reply)
+    }
+
+    fn explain(&mut self, file: &str) -> anyhow::Result<()> {
+        if file.is_empty() {
+            anyhow::bail!("usage: explain <file>");
+        }
+        let path = self.resolve(file);
+        let text = files::read_text_preview(&path, 24_000)
+            .ok_or_else(|| anyhow::anyhow!("{} is not a readable text file", path.display()))?;
+        self.stream(format!(
+            "Explain this file ({}) briefly and point out anything wrong:\n\n{text}",
+            path.display()
+        ))?;
+        Ok(())
+    }
+
+    fn offer_commands(&mut self, reply: &str) -> anyhow::Result<()> {
+        for cmd in claude::extract_commands(reply) {
+            println!("\n{BOLD}Suggested:{RESET} {CYAN}{cmd}{RESET}");
+            let answer = self.editor.readline("Run it? [y/N] ").unwrap_or_default();
+            if answer.trim().eq_ignore_ascii_case("y") {
+                if let Some(dir) = cmd.strip_prefix("cd ") {
+                    self.cd(dir.trim())?;
+                } else {
+                    self.passthrough(&cmd)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn backend(&mut self, arg: &str) -> anyhow::Result<()> {
+        if arg.is_empty() {
+            println!(
+                "Backend: {} (resolved: {}). Options: cli | api | auto",
+                self.cfg.backend.label(),
+                claude::backend_status(&self.cfg)
+            );
+            return Ok(());
+        }
+        let kind =
+            BackendKind::parse(arg).ok_or_else(|| anyhow::anyhow!("use cli, api or auto"))?;
+        if kind == BackendKind::Api && self.cfg.effective_api_key().is_none() {
+            println!("{DIM}No API key yet: run `key` or set ANTHROPIC_API_KEY.{RESET}");
+        }
+        self.cfg.backend = kind;
+        self.cfg.save()?;
+        println!("Claude backend set to {}.", kind.label());
+        Ok(())
+    }
+
+    fn model(&mut self, arg: &str) -> anyhow::Result<()> {
+        if arg.is_empty() {
+            println!("API model: {}", self.cfg.model);
+        } else {
+            self.cfg.model = arg.to_string();
+            self.cfg.save()?;
+            println!("API model set to {arg}.");
+        }
+        Ok(())
+    }
+
+    fn set_key(&mut self) -> anyhow::Result<()> {
+        println!(
+            "{DIM}The key is stored in plain text at {}. Leave empty to remove it.{RESET}",
+            Config::path().display()
+        );
+        let k = self.editor.readline("Anthropic API key: ")?;
+        let k = k.trim();
+        self.cfg.api_key = if k.is_empty() {
+            None
+        } else {
+            Some(k.to_string())
+        };
+        self.cfg.save()?;
+        println!("Saved.");
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ files --
+
+    fn resolve(&self, p: &str) -> PathBuf {
+        let p = orbit_core::expand_tilde(p);
+        if p.is_absolute() {
+            p
+        } else {
+            self.cwd.join(p)
+        }
+    }
+
+    fn cd(&mut self, dir: &str) -> anyhow::Result<()> {
+        let target = if dir.is_empty() {
+            dirs_home().unwrap_or_else(|| ".".into())
+        } else {
+            self.resolve(dir)
+        };
+        let target = target.canonicalize()?;
+        if !target.is_dir() {
+            anyhow::bail!("not a directory: {}", target.display());
+        }
+        self.cwd = target;
+        Ok(())
+    }
+
+    fn ls(&self, dir: &str) -> anyhow::Result<()> {
+        let path = if dir.is_empty() {
+            self.cwd.clone()
+        } else {
+            self.resolve(dir)
+        };
+        for e in files::list(&path, false)? {
+            if e.is_dir {
+                println!("{CYAN}{}/{RESET}", e.name);
+            } else {
+                println!("{:<40} {DIM}{:>10}{RESET}", e.name, human_bytes(e.size));
+            }
+        }
+        Ok(())
+    }
+
+    fn cat(&self, file: &str) -> anyhow::Result<()> {
+        print!("{}", std::fs::read_to_string(self.resolve(file))?);
+        Ok(())
+    }
+
+    // ----------------------------------------------------------- system --
+
+    fn ps(&mut self) -> anyhow::Result<()> {
+        // Two samples so CPU figures are real.
+        self.monitor.snapshot(0);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let s = self.monitor.snapshot(15);
+        println!(
+            "{BOLD}{:>8}  {:<28} {:>7} {:>10}{RESET}",
+            "PID", "NAME", "CPU%", "MEM"
+        );
+        for p in s.top_procs {
+            println!(
+                "{:>8}  {:<28} {:>6.1}% {:>10}",
+                p.pid,
+                truncate(&p.name, 28),
+                p.cpu,
+                human_bytes(p.memory)
+            );
+        }
+        println!(
+            "{DIM}{} processes · CPU {:.0}% · RAM {} / {}{RESET}",
+            s.proc_count,
+            s.cpu_total,
+            human_bytes(s.mem_used),
+            human_bytes(s.mem_total)
+        );
+        Ok(())
+    }
+
+    fn kill(&mut self, pid: &str) -> anyhow::Result<()> {
+        let pid: u32 = pid
+            .parse()
+            .map_err(|_| anyhow::anyhow!("usage: kill <pid>"))?;
+        let ok = self
+            .editor
+            .readline(&format!("End process {pid}? [y/N] "))
+            .unwrap_or_default();
+        if ok.trim().eq_ignore_ascii_case("y") {
+            self.monitor.snapshot(0);
+            println!(
+                "{}",
+                if self.monitor.kill(pid) {
+                    "Signal sent."
+                } else {
+                    "Could not end that process."
+                }
+            );
+        }
+        Ok(())
+    }
+
+    fn apps(&mut self) -> &[apps::App] {
+        self.apps.get_or_insert_with(apps::discover)
+    }
+
+    fn list_apps(&mut self, filter: &str) -> anyhow::Result<()> {
+        let list = self.apps();
+        let found = apps::find(list, filter);
+        for a in &found {
+            println!("  {}", a.name);
+        }
+        println!("{DIM}{} apps{RESET}", found.len());
+        Ok(())
+    }
+
+    fn launch(&mut self, name: &str) -> anyhow::Result<()> {
+        if name.is_empty() {
+            anyhow::bail!("usage: launch <app name>");
+        }
+        let list = self.apps().to_vec();
+        let found = apps::find(&list, name);
+        let app = found
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .or_else(|| found.first())
+            .ok_or_else(|| anyhow::anyhow!("no app matching '{name}' (try `apps`)"))?;
+        apps::launch(app)?;
+        println!("Launched {}.", app.name);
+        Ok(())
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n - 1).collect::<String>())
+    }
+}
+
+fn toml_view(cfg: &Config) -> String {
+    let mut c = cfg.clone();
+    if c.api_key.is_some() {
+        c.api_key = Some("•••••• (hidden)".into());
+    }
+    format!(
+        "backend = {:?}\nmodel = {}\nmax_tokens = {}\napi_key = {}\ncli_path = {}\nfullscreen = {}",
+        c.backend,
+        c.model,
+        c.max_tokens,
+        c.api_key.unwrap_or_else(|| "none".into()),
+        c.cli_path.unwrap_or_else(|| "auto".into()),
+        c.fullscreen
+    )
+}
+
+fn help() {
+    println!(
+        "{BOLD}Claude{RESET}
+  ? <question>      ask Claude (conversation is remembered)
+  do <task>         Claude writes a command; you confirm before it runs
+  explain <file>    Claude explains a text or code file
+  forget            start a new conversation
+  backend [cli|api|auto]   show or switch how Claude is reached
+  model [name]      API model   ·   key   set or remove API key
+{BOLD}Files{RESET}
+  ls [dir]  cd [dir]  pwd  cat <file>  open [path|url]
+{BOLD}System{RESET}
+  sys   ps   kill <pid>   apps [filter]   launch <app>
+{BOLD}Other{RESET}
+  config  clear  exit
+Anything else runs in your host shell ({}).",
+        orbit_core::host_shell()
+    );
+}

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/orbit-core",
+    "crates/orbit-shell",
+    "crates/orbit-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["OrbitOS contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+sysinfo = "=0.30.13"
+ureq = { version = "2", features = ["json"] }
+chrono = "0.4"
+rustyline = "14"
+eframe = "0.27"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
