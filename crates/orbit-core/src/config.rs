@@ -50,6 +50,12 @@ pub struct Config {
     pub cli_path: Option<String>,
     /// Start the desktop fullscreen (useful as a login session).
     pub fullscreen: bool,
+    /// Orbit Shield: also scan with ClamAV when it is installed.
+    pub use_clamav: bool,
+    /// Orbit Shield: watch Downloads and Desktop for new files.
+    pub shield_watch: bool,
+    /// Media player volume, 0.0 to 1.0.
+    pub volume: f32,
 }
 
 impl Default for Config {
@@ -61,6 +67,9 @@ impl Default for Config {
             api_key: None,
             cli_path: None,
             fullscreen: false,
+            use_clamav: true,
+            shield_watch: true,
+            volume: 0.8,
         }
     }
 }

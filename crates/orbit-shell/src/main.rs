@@ -1,7 +1,10 @@
 //! `orbit`: the OrbitOS terminal. Built-in commands, Claude chat, and
 //! everything else passed through to the host shell.
 
-use orbit_core::{apps, claude, exec, files, human_bytes, system, BackendKind, Config, Message};
+use orbit_core::{
+    antivirus, apps, claude, exec, files, human_bytes, media, office, system, BackendKind, Config,
+    Message,
+};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::Write;
@@ -118,6 +121,17 @@ impl Shell {
                 println!("{DIM}Conversation cleared.{RESET}");
                 Ok(())
             }
+            "scan" => self.scan(rest),
+            "quarantine" => self.quarantine_list(),
+            "restore" => antivirus::restore(rest).map(|p| println!("Restored {}", p.display())),
+            "update-av" => antivirus::update_clamav().map(|m| println!("ClamAV: {m}")),
+            "play" => self.play(rest),
+            "music" => self.library(media::Kind::Audio, rest),
+            "videos" => self.library(media::Kind::Video, rest),
+            "office" => self.office(rest),
+            "pdf" => office::convert(&self.resolve(rest), "pdf")
+                .map(|p| println!("Saved {}", p.display())),
+            "draft" => self.draft(rest),
             "cd" => self.cd(rest),
             "pwd" => {
                 println!("{}", self.cwd.display());
@@ -285,6 +299,182 @@ impl Shell {
         Ok(())
     }
 
+    // ----------------------------------------------------- Orbit Shield --
+
+    fn scan(&mut self, target: &str) -> anyhow::Result<()> {
+        let targets = if target.is_empty() {
+            antivirus::quick_scan_paths()
+        } else {
+            vec![self.resolve(target)]
+        };
+        println!(
+            "{BOLD}Orbit Shield{RESET} scanning: {}",
+            targets
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let opts = antivirus::ScanOptions {
+            use_clamav: self.cfg.use_clamav,
+            ..Default::default()
+        };
+        let report = antivirus::scan(
+            &targets,
+            &opts,
+            &std::sync::atomic::AtomicBool::new(false),
+            &mut |n, _| {
+                print!("\r{DIM}{n} files checked…{RESET}");
+                let _ = std::io::stdout().flush();
+            },
+        );
+        println!(
+            "\r{} files checked in {:.1}s{}.          ",
+            report.files_scanned,
+            report.duration.as_secs_f32(),
+            if report.clamav_used {
+                " (Orbit engine + ClamAV)"
+            } else {
+                " (Orbit engine)"
+            }
+        );
+        for n in &report.notes {
+            println!("{DIM}{n}{RESET}");
+        }
+        if report.findings.is_empty() {
+            println!("\x1b[32mNo threats found.{RESET}");
+            return Ok(());
+        }
+        for f in &report.findings {
+            let col = match f.severity {
+                antivirus::Severity::High => RED,
+                antivirus::Severity::Medium => "\x1b[33m",
+                antivirus::Severity::Low => DIM,
+            };
+            println!(
+                "\n{col}{BOLD}[{}]{RESET} {BOLD}{}{RESET} {DIM}({}){RESET}\n  {}\n  {DIM}{}{RESET}",
+                f.severity.label(),
+                f.threat,
+                f.engine,
+                f.path.display(),
+                f.detail
+            );
+            let ans = self
+                .editor
+                .readline("  Quarantine [q], ask Claude [c], or skip [Enter]? ")
+                .unwrap_or_default();
+            match ans.trim() {
+                "q" | "Q" => match antivirus::quarantine(&f.path, &f.threat) {
+                    Ok(_) => println!("  Quarantined."),
+                    Err(e) => println!("  {RED}{e}{RESET}"),
+                },
+                "c" | "C" => {
+                    self.stream(f.describe())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn quarantine_list(&self) -> anyhow::Result<()> {
+        let items = antivirus::quarantine_list();
+        if items.is_empty() {
+            println!("Quarantine is empty.");
+        }
+        for q in items {
+            println!(
+                "{BOLD}{}{RESET}  {}  {DIM}{}{RESET}",
+                q.id,
+                q.threat,
+                q.original.display()
+            );
+        }
+        println!("{DIM}Use `restore <id>` to put a file back.{RESET}");
+        Ok(())
+    }
+
+    // ------------------------------------------------------- media/office --
+
+    fn play(&self, target: &str) -> anyhow::Result<()> {
+        if target.is_empty() {
+            anyhow::bail!("usage: play <file>   (music and video open in mpv, then VLC)");
+        }
+        let by = media::play_external(&[self.resolve(target)])?;
+        println!("Playing in {by}.");
+        Ok(())
+    }
+
+    fn library(&self, kind: media::Kind, filter: &str) -> anyhow::Result<()> {
+        let items = media::scan(&media::library_dirs(kind), kind);
+        let q = filter.to_lowercase();
+        let found: Vec<_> = items
+            .iter()
+            .filter(|i| i.title.to_lowercase().contains(&q))
+            .collect();
+        for i in &found {
+            println!(
+                "  {:<40} {DIM}{}{RESET}",
+                truncate(&i.title, 40),
+                i.path.display()
+            );
+        }
+        println!("{DIM}{} items · `play <path>` to play{RESET}", found.len());
+        if media::players().is_empty() {
+            println!(
+                "{DIM}No mpv/VLC found: {}{RESET}",
+                media::player_install_hint()
+            );
+        }
+        Ok(())
+    }
+
+    fn office(&self, args: &str) -> anyhow::Result<()> {
+        let (sub, rest) = args
+            .split_once(' ')
+            .map(|(a, b)| (a, b.trim()))
+            .unwrap_or((args, ""));
+        match sub {
+            "new" => {
+                let kind = office::DocKind::parse(if rest.is_empty() { "writer" } else { rest })
+                    .ok_or_else(|| anyhow::anyhow!("use: office new writer|calc|impress|draw"))?;
+                office::new_document(kind)?;
+                println!("Opening LibreOffice {}.", kind.app());
+            }
+            "open" => office::open(&self.resolve(rest))?,
+            "recent" | "" => {
+                match office::find_soffice() {
+                    Some(p) => println!("LibreOffice: {}", p.display()),
+                    None => println!("LibreOffice not installed: {}", office::install_hint()),
+                }
+                for p in office::recent_documents(15) {
+                    println!("  {}", p.display());
+                }
+                println!("{DIM}office new <writer|calc|impress|draw> · office open <file> · pdf <file> · draft <topic>{RESET}");
+            }
+            _ => anyhow::bail!("use: office [new <kind> | open <file> | recent]"),
+        }
+        Ok(())
+    }
+
+    fn draft(&mut self, topic: &str) -> anyhow::Result<()> {
+        if topic.is_empty() {
+            anyhow::bail!("usage: draft <what the document should be>");
+        }
+        let text = self.stream(format!(
+            "Write the following as a finished document in Markdown, starting with a '# ' title. \
+             Output only the document.\n\nRequest: {topic}"
+        ))?;
+        let title = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("# ").map(str::to_string))
+            .unwrap_or_else(|| topic.to_string());
+        let path = office::save_draft(&title, &text, "docx")?;
+        println!("Saved {}", path.display());
+        let _ = office::open(&path);
+        Ok(())
+    }
+
     // ------------------------------------------------------------ files --
 
     fn resolve(&self, p: &str) -> PathBuf {
@@ -449,6 +639,13 @@ fn help() {
   model [name]      API model   ·   key   set or remove API key
 {BOLD}Files{RESET}
   ls [dir]  cd [dir]  pwd  cat <file>  open [path|url]
+{BOLD}Orbit Shield (antivirus){RESET}
+  scan [path]       quick scan, or scan a file/folder (Orbit engine + ClamAV)
+  quarantine        list quarantined files  ·  restore <id>  ·  update-av
+{BOLD}Media & Office{RESET}
+  music [filter]  videos [filter]  play <file>      (mpv / VLC)
+  office [new <writer|calc|impress|draw> | open <file>]   pdf <file>
+  draft <topic>     Claude writes it, saved as a Word document
 {BOLD}System{RESET}
   sys   ps   kill <pid>   apps [filter]   launch <app>
 {BOLD}Other{RESET}

@@ -72,6 +72,33 @@ pub fn spawn_detached(cmd: &str) -> Result<()> {
     Ok(())
 }
 
+/// Find an executable on PATH (adds `.exe`/`.cmd`/`.bat` on Windows).
+pub fn which(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    for dir in std::env::split_paths(&path) {
+        for ext in exts {
+            let candidate = dir.join(format!("{name}{ext}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// First existing path from a list of well-known install locations.
+pub fn first_existing(paths: &[&str]) -> Option<std::path::PathBuf> {
+    paths
+        .iter()
+        .map(|p| crate::expand_tilde(p))
+        .find(|p| p.exists())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +108,11 @@ mod tests {
         let out = run_capture("echo orbit", Path::new(".")).unwrap();
         assert!(out.status.success());
         assert!(out.stdout.contains("orbit"));
+    }
+
+    #[test]
+    fn finds_sh_or_cmd() {
+        assert!(which(if cfg!(windows) { "cmd" } else { "sh" }).is_some());
+        assert!(which("definitely-not-a-real-binary-xyz").is_none());
     }
 }

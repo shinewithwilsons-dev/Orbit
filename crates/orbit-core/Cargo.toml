@@ -1,6 +1,6 @@
 [package]
 name = "orbit-core"
-description = "OrbitOS core: config, Claude backends (CLI + API), system, apps, files"
+description = "OrbitOS core: config, Claude, system, apps, files, Orbit Shield antivirus, media, office"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,3 +13,11 @@ toml.workspace = true
 dirs.workspace = true
 sysinfo.workspace = true
 ureq.workspace = true
+sha2 = "0.10"
+rodio = { version = "0.19", optional = true, default-features = false, features = ["symphonia-all"] }
+
+[features]
+default = ["audio"]
+# In-app music playback. Build with --no-default-features to skip it
+# (for example on Linux without ALSA headers); music then opens in mpv/VLC.
+audio = ["dep:rodio"]

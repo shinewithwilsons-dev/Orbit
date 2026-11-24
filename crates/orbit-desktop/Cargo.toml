@@ -10,6 +10,12 @@ name = "orbit-desktop"
 path = "src/main.rs"
 
 [dependencies]
-orbit-core = { path = "../orbit-core" }
+orbit-core = { path = "../orbit-core", default-features = false }
 eframe.workspace = true
 chrono.workspace = true
+dirs.workspace = true
+
+[features]
+default = ["audio"]
+# In-app music playback (needs ALSA headers on Linux to build).
+audio = ["orbit-core/audio"]

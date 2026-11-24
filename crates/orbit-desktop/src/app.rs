@@ -9,11 +9,24 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+mod files_ui;
+mod icons;
+mod media_ui;
+mod office_ui;
+mod shield;
+
 enum Event {
     ClaudeChunk(String),
     ClaudeDone(Result<String, String>),
     Term(String),
     TermDone,
+    ScanProgress(usize, String),
+    ScanDone(orbit_core::antivirus::ScanReport),
+    Realtime(Vec<orbit_core::antivirus::Finding>),
+    ShieldUpdate(Result<String, String>),
+    MediaLibrary(Vec<orbit_core::media::Item>, Vec<orbit_core::media::Item>),
+    OfficeMsg(Result<String, String>),
+    DraftDone(Result<PathBuf, String>),
 }
 
 #[derive(Default)]
@@ -24,6 +37,9 @@ struct Windows {
     monitor: bool,
     settings: bool,
     about: bool,
+    shield: bool,
+    media: bool,
+    office: bool,
 }
 
 pub struct Desktop {
@@ -65,6 +81,17 @@ pub struct Desktop {
 
     // settings
     key_edit: String,
+
+    // desktop icons
+    icons: Vec<icons::DesktopIcon>,
+    selected_icon: Option<usize>,
+    files_grid: bool,
+    file_selected: Option<PathBuf>,
+
+    // Orbit Shield, Media, Office
+    shield: shield::ShieldState,
+    media: media_ui::MediaState,
+    office: office_ui::OfficeState,
 }
 
 impl Desktop {
@@ -83,16 +110,27 @@ impl Desktop {
             rx,
             win: if std::env::args().any(|a| a == "--show-all") {
                 Windows {
-                    claude: true,
                     files: true,
-                    terminal: true,
-                    monitor: true,
+                    shield: true,
+                    media: true,
                     ..Default::default()
                 }
             } else {
+                // --open=files,shield,media,office,claude,terminal,monitor,settings
+                let list = std::env::args()
+                    .find_map(|a| a.strip_prefix("--open=").map(str::to_string))
+                    .unwrap_or_default();
+                let has = |n: &str| list.split(',').any(|x| x.trim() == n);
                 Windows {
-                    claude: true,
-                    ..Default::default()
+                    files: has("files"),
+                    terminal: has("terminal"),
+                    claude: has("claude"),
+                    monitor: has("monitor"),
+                    settings: has("settings"),
+                    shield: has("shield"),
+                    media: has("media"),
+                    office: has("office"),
+                    about: false,
                 }
             },
             toast: None,
@@ -119,8 +157,21 @@ impl Desktop {
             chat_input: String::new(),
             streaming: None,
             pending_run: None,
+            icons: icons::default_icons(),
+            selected_icon: None,
+            files_grid: true,
+            file_selected: None,
+            shield: shield::ShieldState::new(false),
+            media: media_ui::MediaState::new(),
+            office: office_ui::OfficeState::new(),
         };
         d.refresh_files();
+        if d.win.media {
+            d.open_media();
+        }
+        if d.win.office {
+            d.open_office();
+        }
         d
     }
 
@@ -146,8 +197,33 @@ impl Desktop {
                 }
                 Event::Term(s) => self.term_log.push_str(&s),
                 Event::TermDone => self.term_busy = false,
+                Event::ScanProgress(n, p) => {
+                    self.shield.count = n;
+                    self.shield.current = p;
+                }
+                Event::ScanDone(r) => self.on_scan_done(r),
+                Event::Realtime(f) => self.on_realtime(f),
+                Event::ShieldUpdate(r) => {
+                    self.shield.updating = false;
+                    self.shield.clamav = orbit_core::antivirus::clamav_version();
+                    match r {
+                        Ok(m) => self.notify(format!("ClamAV: {m}")),
+                        Err(e) => self.notify(format!("Signature update failed: {e}")),
+                    }
+                }
+                Event::MediaLibrary(m, v) => self.on_media_library(m, v),
+                Event::OfficeMsg(r) => {
+                    let msg = r.unwrap_or_else(|e| e);
+                    self.office.status = Some(msg.clone());
+                    self.notify(msg);
+                    self.refresh_files();
+                    self.office.recent = orbit_core::office::recent_documents(25);
+                }
+                Event::DraftDone(r) => self.on_draft_done(r),
             }
         }
+        self.shield_tick();
+        self.media_tick();
         if self.last_sample.elapsed() > Duration::from_millis(1500) {
             self.snap = self.monitor.snapshot(12);
             self.last_sample = Instant::now();
@@ -306,40 +382,36 @@ impl eframe::App for Desktop {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 theme::paint_wallpaper(ui.painter(), rect, ctx.input(|i| i.time));
-                ui.allocate_ui_at_rect(rect.shrink(40.0), |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(rect.height() * 0.28);
-                        ui.label(
-                            RichText::new("OrbitOS")
-                                .size(54.0)
-                                .strong()
-                                .color(Color32::from_white_alpha(230)),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · Claude via {}",
-                                orbit_core::host_os(),
+                // Watermark in the middle of the desktop.
+                ui.painter().text(
+                    rect.center() - egui::vec2(0.0, 30.0),
+                    egui::Align2::CENTER_CENTER,
+                    "OrbitOS",
+                    egui::FontId::proportional(60.0),
+                    Color32::from_white_alpha(40),
+                );
+                self.desktop_icons(ui, rect);
+                // Quick-ask box near the bottom; text kept in egui memory between frames.
+                let bar = egui::Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.max.y - 34.0),
+                    egui::vec2(480.0, 30.0),
+                );
+                ui.allocate_ui_at_rect(bar, |ui| {
+                    let id = egui::Id::new("quick_ask_text");
+                    let mut stored: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+                    let r2 = ui.add(
+                        egui::TextEdit::singleline(&mut stored)
+                            .hint_text(format!(
+                                "Ask Claude anything… ({})",
                                 claude::backend_status(&self.cfg)
                             ))
-                            .size(16.0)
-                            .color(theme::DIM),
-                        );
-                        ui.add_space(14.0);
-                        // Quick-ask box; its text is kept in egui memory between frames.
-                        let id = egui::Id::new("quick_ask_text");
-                        let mut stored: String =
-                            ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
-                        let r2 = ui.add(
-                            egui::TextEdit::singleline(&mut stored)
-                                .hint_text("Ask Claude anything… (Enter)")
-                                .desired_width(460.0),
-                        );
-                        if r2.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let q = std::mem::take(&mut stored);
-                            self.send_to_claude(q);
-                        }
-                        ui.data_mut(|d| d.insert_temp(id, stored));
-                    });
+                            .desired_width(480.0),
+                    );
+                    if r2.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let q = std::mem::take(&mut stored);
+                        self.send_to_claude(q);
+                    }
+                    ui.data_mut(|d| d.insert_temp(id, stored));
                 });
             });
 
@@ -349,6 +421,9 @@ impl eframe::App for Desktop {
         self.monitor_window(ctx);
         self.settings_window(ctx);
         self.about_window(ctx);
+        self.shield_window(ctx);
+        self.media_window(ctx);
+        self.office_window(ctx);
         self.confirm_run(ctx);
         self.toast_ui(ctx);
 
@@ -402,6 +477,29 @@ impl Desktop {
                             .strong(),
                         );
                         ui.separator();
+                        let threats = self
+                            .shield
+                            .findings
+                            .iter()
+                            .filter(|f| f.severity >= orbit_core::antivirus::Severity::Medium)
+                            .count();
+                        let (shield_text, shield_col) = if self.shield.scanning {
+                            ("Shield: scanning".to_string(), theme::ACCENT)
+                        } else if threats > 0 {
+                            (format!("Shield: {threats} threat(s)"), theme::BAD)
+                        } else {
+                            ("Shield: protected".to_string(), theme::SHIELD_GREEN)
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new(shield_text).color(shield_col))
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            self.win.shield = true;
+                        }
+                        ui.separator();
                         let busy = self.streaming.is_some();
                         ui.label(
                             RichText::new(if busy {
@@ -432,7 +530,7 @@ impl Desktop {
             .exact_height(46.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let total = 6.0 * 118.0;
+                    let total = 10.0 * 104.0;
                     ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                     let item = |ui: &mut egui::Ui, label: &str, open: &mut bool| {
                         let text = if *open {
@@ -441,7 +539,7 @@ impl Desktop {
                             RichText::new(label)
                         };
                         if ui
-                            .add_sized([110.0, 32.0], egui::Button::new(text))
+                            .add_sized([96.0, 32.0], egui::Button::new(text))
                             .clicked()
                         {
                             *open = !*open;
@@ -453,6 +551,17 @@ impl Desktop {
                     item(ui, "Files", &mut self.win.files);
                     item(ui, "Terminal", &mut self.win.terminal);
                     item(ui, "Claude", &mut self.win.claude);
+                    item(ui, "Shield", &mut self.win.shield);
+                    let was_media = self.win.media;
+                    item(ui, "Media", &mut self.win.media);
+                    if self.win.media && !was_media {
+                        self.open_media();
+                    }
+                    let was_office = self.win.office;
+                    item(ui, "Office", &mut self.win.office);
+                    if self.win.office && !was_office {
+                        self.open_office();
+                    }
                     item(ui, "Monitor", &mut self.win.monitor);
                     item(ui, "Settings", &mut self.win.settings);
                 });
@@ -500,115 +609,6 @@ impl Desktop {
                     }
                 }
             });
-    }
-
-    fn files_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.win.files;
-        egui::Window::new("Files")
-            .open(&mut open)
-            .default_size([600.0, 330.0])
-            .default_pos([24.0, 48.0])
-            .show(ctx, |ui| {
-                let mut nav: Option<PathBuf> = None;
-                let mut ask: Option<PathBuf> = None;
-                ui.horizontal(|ui| {
-                    if ui.button("⬆ Up").clicked() {
-                        if let Some(p) = self.cwd.parent() {
-                            nav = Some(p.to_path_buf());
-                        }
-                    }
-                    if ui.button("Home").clicked() {
-                        nav = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                            .map(PathBuf::from);
-                    }
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.path_edit)
-                            .desired_width(ui.available_width() - 150.0),
-                    );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        nav = Some(orbit_core::expand_tilde(&self.path_edit));
-                    }
-                    if ui.checkbox(&mut self.show_hidden, "Hidden").changed() {
-                        nav = Some(self.cwd.clone());
-                    }
-                    if ui.button("⟳").clicked() {
-                        nav = Some(self.cwd.clone());
-                    }
-                });
-                ui.separator();
-                if let Some(e) = &self.files_err {
-                    ui.colored_label(theme::BAD, e);
-                }
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false; 2])
-                    .show(ui, |ui| {
-                        egui::Grid::new("files_grid")
-                            .num_columns(2)
-                            .striped(true)
-                            .min_col_width(80.0)
-                            .show(ui, |ui| {
-                                for e in &self.entries {
-                                    let label = if e.is_dir {
-                                        RichText::new(format!("▸ {}", e.name)).color(theme::ACCENT)
-                                    } else {
-                                        RichText::new(&e.name)
-                                    };
-                                    let r =
-                                        ui.add(egui::Label::new(label).sense(egui::Sense::click()));
-                                    if r.double_clicked() {
-                                        if e.is_dir {
-                                            nav = Some(e.path.clone());
-                                        } else {
-                                            let _ = exec::open(&e.path.to_string_lossy());
-                                        }
-                                    }
-                                    r.context_menu(|ui| {
-                                        if ui.button("Open").clicked() {
-                                            if e.is_dir {
-                                                nav = Some(e.path.clone());
-                                            } else {
-                                                let _ = exec::open(&e.path.to_string_lossy());
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if !e.is_dir
-                                            && ui.button("Ask Claude about this file").clicked()
-                                        {
-                                            ask = Some(e.path.clone());
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Copy path").clicked() {
-                                            ui.ctx().output_mut(|o| {
-                                                o.copied_text = e.path.display().to_string()
-                                            });
-                                            ui.close_menu();
-                                        }
-                                    });
-                                    ui.label(
-                                        RichText::new(if e.is_dir {
-                                            String::from("folder")
-                                        } else {
-                                            human_bytes(e.size)
-                                        })
-                                        .color(theme::DIM),
-                                    );
-                                    ui.end_row();
-                                }
-                            });
-                    });
-                ui.label(
-                    RichText::new("Double-click to open · right-click for Claude")
-                        .small()
-                        .color(theme::DIM),
-                );
-                if let Some(p) = nav {
-                    self.go_to(p);
-                }
-                if let Some(p) = ask {
-                    self.ask_about_file(&p);
-                }
-            });
-        self.win.files = open;
     }
 
     fn terminal_window(&mut self, ctx: &egui::Context) {

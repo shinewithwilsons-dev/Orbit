@@ -3,11 +3,14 @@
 //! Everything platform-specific lives here so the shell and desktop stay
 //! identical on Windows, Linux and macOS.
 
+pub mod antivirus;
 pub mod apps;
 pub mod claude;
 pub mod config;
 pub mod exec;
 pub mod files;
+pub mod media;
+pub mod office;
 pub mod system;
 
 pub use claude::{Message, Role};
@@ -49,6 +52,41 @@ pub fn expand_tilde(input: &str) -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from(input)
+}
+
+/// Standard user folders. Uses the OS setting (localised names, XDG on
+/// Linux) and falls back to `~/Documents`, `~/Music`, … when it's not set.
+pub mod user_dirs {
+    use std::path::PathBuf;
+
+    fn pick(os: Option<PathBuf>, fallback: &str) -> Option<PathBuf> {
+        os.filter(|p| p.exists()).or_else(|| {
+            let p = dirs::home_dir()?.join(fallback);
+            p.exists().then_some(p)
+        })
+    }
+    pub fn documents() -> Option<PathBuf> {
+        pick(dirs::document_dir(), "Documents")
+    }
+    pub fn downloads() -> Option<PathBuf> {
+        pick(dirs::download_dir(), "Downloads")
+    }
+    pub fn desktop() -> Option<PathBuf> {
+        pick(dirs::desktop_dir(), "Desktop")
+    }
+    pub fn music() -> Option<PathBuf> {
+        pick(dirs::audio_dir(), "Music")
+    }
+    pub fn videos() -> Option<PathBuf> {
+        pick(
+            dirs::video_dir(),
+            if cfg!(target_os = "macos") {
+                "Movies"
+            } else {
+                "Videos"
+            },
+        )
+    }
 }
 
 /// Format a byte count as KB / MB / GB.
