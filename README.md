@@ -1,5 +1,7 @@
 # OrbitOS
 
+> Orbit is an operating system experience that works on Windows, Linux and Mac with Claude AI built in.
+
 A desktop environment and shell written in Rust, with Claude built in.
 One codebase runs on **Windows, Linux and macOS**, on any laptop that can run
 a modern OS.
