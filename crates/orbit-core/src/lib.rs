@@ -6,12 +6,14 @@
 pub mod actions;
 pub mod antivirus;
 pub mod apps;
+pub mod autostart;
 pub mod backup;
 pub mod calc;
 pub mod claude;
 pub mod config;
 pub mod exec;
 pub mod files;
+pub mod instance;
 pub mod media;
 pub mod network;
 pub mod office;

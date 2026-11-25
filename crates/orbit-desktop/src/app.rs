@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+mod agent;
 mod center;
 mod claude_ui;
 mod cmdbar;
@@ -16,7 +17,9 @@ mod media_ui;
 mod office_ui;
 mod settings_ui;
 mod shield;
+mod start_menu;
 mod store_ui;
+mod tray;
 mod voice_ui;
 mod welcome;
 mod wm;
@@ -45,6 +48,9 @@ enum Event {
     Network(Result<Vec<orbit_core::network::Connection>, String>),
     RadioResults(Result<Vec<orbit_core::radio::Station>, String>),
     BeMusicResults(Result<Vec<orbit_core::radio::RemoteTrack>, String>),
+    Tray(tray::TrayCmd),
+    TrayStatus(bool),
+    ScheduledScan(i64),
 }
 
 #[derive(Default)]
@@ -124,11 +130,28 @@ pub struct Desktop {
     settings: settings_ui::SettingsState,
     settings_tab: settings_ui::Tab,
     wallpaper_tex: Option<egui::TextureHandle>,
+
+    // 0.3.1: tray, background agent, Start menu
+    ctl: std::sync::Arc<tray::WinCtl>,
+    tray_parts: tray::TrayParts,
+    primary: Option<orbit_core::instance::Primary>,
+    started: bool,
+    quitting: bool,
+    hidden_at: Option<Instant>,
+    background_start: Option<Instant>,
+    tray_known: Option<bool>,
+    start: start_menu::StartMenu,
+    start_button_clicked: bool,
 }
 
 impl Desktop {
-    pub fn new(cfg: Config, ctx: egui::Context) -> Self {
+    pub fn new(
+        cfg: Config,
+        ctx: egui::Context,
+        primary: Option<orbit_core::instance::Primary>,
+    ) -> Self {
         let (tx, rx) = channel();
+        let ctl = tray::WinCtl::new(ctx.clone(), tx.clone());
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
@@ -211,6 +234,16 @@ impl Desktop {
             settings: settings_ui::SettingsState::default(),
             settings_tab: settings_ui::Tab::Claude,
             wallpaper_tex: None,
+            ctl,
+            tray_parts: tray::TrayParts::default(),
+            primary,
+            started: false,
+            quitting: false,
+            hidden_at: None,
+            background_start: None,
+            tray_known: None,
+            start: start_menu::StartMenu::default(),
+            start_button_clicked: false,
         };
         d.chat = Self::load_current_chat();
         d.welcome.open = !d.cfg.onboarded
@@ -304,6 +337,31 @@ impl Desktop {
                     self.office.recent = orbit_core::office::recent_documents(25);
                 }
                 Event::DraftDone(r) => self.on_draft_done(r),
+                Event::Tray(cmd) => match cmd {
+                    tray::TrayCmd::Search => self.open_cmdbar(),
+                    tray::TrayCmd::Ask => self.open_win(WinId::Claude),
+                    tray::TrayCmd::Scan => {
+                        self.open_win(WinId::Shield);
+                        self.start_scan(orbit_core::antivirus::quick_scan_paths());
+                    }
+                    tray::TrayCmd::Quit => self.quit(),
+                },
+                Event::TrayStatus(ok) => {
+                    if !ok && self.tray_known.is_none() && self.cfg.close_to_tray {
+                        self.push_note(
+                            "No system tray here",
+                            "Closing Orbit will minimise it to the taskbar instead.",
+                        );
+                    }
+                    self.tray_known = Some(ok);
+                }
+                Event::ScheduledScan(day) => {
+                    self.cfg.last_scheduled_scan_day = day;
+                    let _ = self.cfg.save();
+                    self.shield.scanning = true;
+                    self.shield.summary = None;
+                    self.push_note("Orbit Shield", "Running your daily quick scan");
+                }
                 Event::ActionDone(m, c, out) => self.on_action_done(m, c, out),
                 Event::ImageDone(r) => {
                     self.claude.generating_image = false;
@@ -368,7 +426,6 @@ impl Desktop {
                 }
             }
         }
-        self.shield_tick();
         self.media_tick();
         self.weather_tick();
         self.backup_tick();
@@ -517,8 +574,120 @@ impl Desktop {
     }
 }
 
+impl Desktop {
+    fn first_frame(&mut self, frame: &eframe::Frame) {
+        self.ctl.handle.store(
+            tray::window_handle(frame),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.tray_parts = tray::start_tray(&self.ctl);
+        if self.cfg.global_hotkey {
+            if let Err(e) = self.tray_parts.set_hotkey(&self.ctl, true) {
+                self.push_note("Show/hide shortcut unavailable", &e);
+            }
+        }
+        agent::spawn(self.ctl.clone(), self.primary.take());
+        if std::env::args().any(|a| a == "--background" || a == "--hide") {
+            self.background_start = Some(Instant::now());
+        }
+    }
+
+    /// Hide to the tray (or minimise when this desktop has no tray).
+    pub(super) fn hide_to_tray(&mut self) {
+        self.cmd.open = false;
+        self.start.open = false;
+        self.wm.save();
+        self.save_chat();
+        if !self.ctl.tray_ok.load(std::sync::atomic::Ordering::Relaxed) {
+            self.ctx
+                .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            return;
+        }
+        if !self.cfg.tray_tip_shown
+            && self.background_start.is_none()
+            && !std::env::args().any(|a| a == "--background")
+        {
+            self.cfg.tray_tip_shown = true;
+            tray::notify_native(
+                "Orbit is still running",
+                &format!(
+                    "Click the Orbit icon in the tray or press {} to bring it back.",
+                    tray::hotkey_label()
+                ),
+            );
+        }
+        if !self.cfg.listen_while_hidden {
+            self.voice.mode = voice_ui::Mode::Idle;
+            #[cfg(feature = "voice")]
+            {
+                self.voice.rec = None;
+            }
+        }
+        let _ = self.cfg.save();
+        self.hidden_at = Some(Instant::now());
+        self.ctl.hide();
+    }
+
+    /// Quit for real: saves everything (in on_exit), then closes.
+    pub(super) fn quit(&mut self) {
+        self.quitting = true;
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    pub(super) fn set_hotkey(&mut self, on: bool) {
+        if let Err(e) = self.tray_parts.set_hotkey(&self.ctl, on) {
+            self.push_note("Show/hide shortcut unavailable", &e);
+        }
+    }
+}
+
 impl eframe::App for Desktop {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if !self.started {
+            self.started = true;
+            self.first_frame(frame);
+        }
+        if self.ctl.is_hidden() {
+            // macOS: the Dock icon can bring a hidden app back by itself.
+            #[cfg(target_os = "macos")]
+            if self
+                .hidden_at
+                .map(|t| t.elapsed() > Duration::from_secs(1))
+                .unwrap_or(true)
+            {
+                self.ctl
+                    .hidden
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Elsewhere a hidden window draws nothing: just collect events.
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.pump();
+                return;
+            }
+        }
+        // Closing the window hides Orbit to the tray; only Quit exits.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.cfg.close_to_tray
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_to_tray();
+            return;
+        }
+        if let Some(t) = self.background_start {
+            if self.ctl.tray_ok.load(std::sync::atomic::Ordering::Relaxed) {
+                self.background_start = None;
+                self.hide_to_tray();
+                return;
+            } else if t.elapsed() > Duration::from_secs(3) {
+                self.background_start = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Q)) {
+            self.quit();
+        }
+        self.start_button_clicked = false;
+
         self.pump();
         self.voice_tick(ctx);
         let animated = self.cfg.animate_wallpaper && theme::is_animated(&self.cfg.wallpaper);
@@ -617,6 +786,7 @@ impl eframe::App for Desktop {
         self.office_window(ctx);
         self.store_window(ctx);
         self.wm_track(ctx);
+        self.start_menu_ui(ctx);
         self.welcome_ui(ctx);
         self.confirm_run(ctx);
         self.cmdbar_ui(ctx);
@@ -673,8 +843,15 @@ impl Desktop {
                                 ui.close_menu();
                             }
                             ui.separator();
-                            if ui.button("Quit OrbitOS").clicked() {
-                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            if ui
+                                .button(format!("Hide to tray  ({})", tray::hotkey_label()))
+                                .clicked()
+                            {
+                                ui.close_menu();
+                                self.hide_to_tray();
+                            }
+                            if ui.button("Quit Orbit  (Ctrl+Q)").clicked() {
+                                self.quit();
                             }
                         },
                     );
@@ -775,17 +952,19 @@ impl Desktop {
                 ui.horizontal_centered(|ui| {
                     let total = 10.0 * 100.0;
                     ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                    let apps = if self.show_launcher {
-                        RichText::new("Apps").strong().color(theme::accent())
-                    } else {
-                        RichText::new("Apps")
-                    };
-                    if ui
-                        .add_sized([92.0, 32.0], egui::Button::new(apps))
-                        .on_hover_text("Installed apps")
-                        .clicked()
-                    {
-                        self.show_launcher = !self.show_launcher;
+                    let orbit = RichText::new("Orbit").strong().color(theme::accent());
+                    let r = ui
+                        .add_sized(
+                            [92.0, 32.0],
+                            egui::Button::new(orbit)
+                                .stroke(egui::Stroke::new(1.5_f32, theme::accent())),
+                        )
+                        .on_hover_text(
+                            "Orbit Start: search, pinned apps, recent documents, Hide and Quit",
+                        );
+                    if r.clicked() {
+                        self.start_button_clicked = true;
+                        self.toggle_start();
                     }
                     for k in wm::MANAGED {
                         self.dock_item(ui, k);

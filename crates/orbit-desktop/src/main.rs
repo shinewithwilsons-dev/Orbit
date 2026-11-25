@@ -10,6 +10,27 @@ mod theme;
 use orbit_core::Config;
 
 fn main() -> eframe::Result<()> {
+    // One Orbit per user: a second launch passes its request to the running
+    // copy (show by default, or --toggle / --hide / --search / --quit) and exits.
+    let args: Vec<String> = std::env::args().collect();
+    // Windows only lets the foreground app hand focus on: allow the running
+    // copy to come to the front if this launch turns out to be the second.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+            windows_sys::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+        );
+    }
+    let cmd = orbit_core::instance::Command::from_args(&args)
+        .unwrap_or(orbit_core::instance::Command::Show);
+    let primary = match orbit_core::instance::start(cmd) {
+        Ok(orbit_core::instance::Start::Forwarded) => return Ok(()),
+        Ok(orbit_core::instance::Start::Primary(p)) => Some(p),
+        Err(e) => {
+            eprintln!("Orbit: single-instance check unavailable ({e}); starting anyway");
+            None
+        }
+    };
     let cfg = Config::load();
     let fullscreen = cfg.fullscreen || std::env::args().any(|a| a == "--fullscreen");
 
@@ -41,7 +62,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, &cfg);
-            Box::new(app::Desktop::new(cfg, cc.egui_ctx.clone()))
+            Box::new(app::Desktop::new(cfg, cc.egui_ctx.clone(), primary))
         }),
     )
 }

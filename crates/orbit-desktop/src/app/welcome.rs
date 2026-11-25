@@ -198,11 +198,21 @@ impl Desktop {
                             "Ask Claude to do things. Every action asks for your approval first",
                             "Click Mic (or hold F9) to talk; enable \"Hey Orbit\" in Settings -> Voice",
                             "Ctrl+Alt+← / -> snaps windows; Ctrl+Alt+1-4 switches desktops",
-                            "The bell on the top bar opens notifications and widgets",
+                            "Alerts on the top bar opens notifications and widgets",
                             "The App Store installs free apps in one click",
                         ] {
                             ui.label(format!("•  {tip}"));
                         }
+                        ui.add_space(10.0);
+                        let mut auto = self.settings.autostart.unwrap_or_else(orbit_core::autostart::is_enabled);
+                        if ui.checkbox(&mut auto, "Start Orbit when I sign in (it waits in the tray)").changed() {
+                            if let Err(e) = orbit_core::autostart::set_enabled(auto) {
+                                self.notify(format!("Couldn't change start-up: {e}"));
+                            }
+                            auto = orbit_core::autostart::is_enabled();
+                        }
+                        self.settings.autostart = Some(auto);
+                        ui.label(RichText::new(format!("Closing the window keeps Orbit in the tray: click its icon or press {} to bring it back.", super::tray::hotkey_label())).small().color(theme::DIM));
                     }
                 }
                 });

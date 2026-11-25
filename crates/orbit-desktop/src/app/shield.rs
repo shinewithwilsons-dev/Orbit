@@ -15,6 +15,7 @@ pub(super) enum ShieldTab {
     Network,
 }
 
+#[allow(dead_code)] // watch/schedule fields are kept for the polling fallback
 pub(super) struct ShieldState {
     pub tab: ShieldTab,
     pub scanning: bool,
@@ -130,59 +131,6 @@ impl Desktop {
             ));
         }
         self.shield.findings = r.findings;
-    }
-
-    /// Real-time protection (OS file events, falling back to polling) and
-    /// the daily scheduled scan.
-    pub(super) fn shield_tick(&mut self) {
-        // Scheduled scan: check once a minute.
-        if self.shield.last_schedule_check.elapsed() > Duration::from_secs(60) {
-            self.shield.last_schedule_check = Instant::now();
-            let hour = chrono::Timelike::hour(&chrono::Local::now());
-            if antivirus::scheduled_scan_due(&self.cfg, hour) && !self.shield.scanning {
-                self.cfg.last_scheduled_scan_day = orbit_core::today();
-                let _ = self.cfg.save();
-                self.push_note("Orbit Shield", "Running your daily quick scan");
-                self.start_scan(antivirus::quick_scan_paths());
-            }
-        }
-        if !self.cfg.shield_watch {
-            self.shield.live = None;
-            return;
-        }
-        if self.shield.live.is_none() && self.shield.watcher.is_none() {
-            match orbit_core::watch::LiveWatcher::new(&antivirus::watch_paths()) {
-                Ok(w) => self.shield.live = Some(w),
-                Err(_) => self.shield.watcher = Some(Watcher::new(antivirus::watch_paths())),
-            }
-        }
-        let new_files = if let Some(live) = self.shield.live.as_mut() {
-            live.ready()
-        } else if self.shield.last_poll.elapsed() >= Duration::from_secs(4) {
-            self.shield.last_poll = Instant::now();
-            self.shield
-                .watcher
-                .as_mut()
-                .map(|w| w.poll())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        if new_files.is_empty() {
-            return;
-        }
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        std::thread::spawn(move || {
-            let opts = ScanOptions {
-                use_clamav: false,
-                ..Default::default()
-            };
-            let r = antivirus::scan(&new_files, &opts, &AtomicBool::new(false), &mut |_, _| {});
-            if !r.findings.is_empty() {
-                let _ = tx.send(Event::Realtime(r.findings));
-                ctx.request_repaint();
-            }
-        });
     }
 
     fn refresh_network(&mut self) {

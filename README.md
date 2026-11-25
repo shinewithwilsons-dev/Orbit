@@ -24,6 +24,8 @@ session, so it boots straight into OrbitOS.
 | **Orbit Shield** | Antivirus: Orbit engine + ClamAV + YARA, on-arrival protection, daily scans, quarantine, network view with one-click firewall blocks. |
 | **Media** | In-app music with album art, equaliser and playlists. Videos in mpv/VLC, internet radio (50,000+ stations), and your **BeMusic** site. |
 | **Office** | LibreOffice integration, PDF conversion, and Claude-written Word documents. |
+| **Runs in the tray** *(new in 0.3.1)* | Closing the window hides Orbit to the system tray / menu bar, where it keeps Shield and scheduled scans running at near-zero CPU. One click (or Ctrl+Alt+O) brings it straight back. |
+| **Start menu** *(new in 0.3.1)* | The Orbit button opens pinned apps, search, recent documents, and Hide / Quit. |
 | **Desktop** | Clickable icons, folder views, snap and maximise, minimise to dock, 4 virtual desktops, remembered window positions. |
 | **Look** | 5 themes, custom accent colour, animated wallpapers (starfield, warp, planet, aurora) or your own picture. |
 | **Notifications & widgets** | Clock, calendar, weather, now playing, system and Shield status, plus a notification history. |
@@ -37,6 +39,8 @@ session, so it boots straight into OrbitOS.
 | ![Claude actions](docs/claude-actions.png) | ![Command bar](docs/command-bar.png) |
 | **App Store, widgets & calendar** | **First-run welcome** |
 | ![App Store](docs/app-store.png) | ![Welcome](docs/welcome.png) |
+| **Start menu (0.3.1)** | |
+| ![Start menu](docs/start-menu.png) | |
 
 ## What's inside
 
@@ -118,17 +122,17 @@ spreadsheets, presentations and drawings, recent files, **Convert to PDF**, and
 ## Install
 
 ### Installers
-Push a tag (`git tag v0.3.0 && git push --tags`) and the **Release installers**
-workflow builds and attaches:
-- **Windows**: `OrbitOS_0.3.0_x64-setup.exe` (NSIS) and `.msi` (WiX)
-- **macOS**: `OrbitOS_0.3.0_aarch64.dmg`
-- **Linux**: `orbit-desktop_0.3.0_amd64.deb` and `.AppImage`
+Publish a release on GitHub (Releases → Draft a new release → tag `v0.3.1`) and the
+**Release installers** workflow builds and attaches:
+- **Windows**: `OrbitOS_0.3.1_x64-setup.exe` (NSIS) and `.msi` (WiX)
+- **macOS**: `OrbitOS_0.3.1_aarch64.dmg` (Apple silicon) and `OrbitOS_0.3.1_x64.dmg` (Intel)
+- **Linux**: `orbit-desktop_0.3.1_amd64.deb` and `.AppImage`
 
 The `.deb` also adds **OrbitOS** to your login screen's session list.
 
 ### From source
 1. Install Rust: <https://rustup.rs>
-2. Linux only: `sudo apt install libxkbcommon-dev libgl1-mesa-dev libasound2-dev`
+2. Linux only: `sudo apt install libxkbcommon-dev libgl1-mesa-dev libasound2-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev`
    · Windows only: Visual Studio Build Tools ("Desktop development with C++")
 3. `cargo build --release` → `target/release/orbit` and `target/release/orbit-desktop`
 4. Build installers yourself: `cargo install cargo-packager --locked`, then
@@ -152,6 +156,8 @@ audio (`audio`) and microphone support (`voice`).
 
 | Keys (Cmd on macOS) | Does |
 |---|---|
+| Ctrl+Alt+O (Cmd+Option+O) | Show / hide Orbit from anywhere, even when it's in the tray |
+| Ctrl+Q | Quit Orbit completely |
 | Ctrl+Space or Alt+Space | Command bar |
 | Ctrl+K | Claude |
 | F9 (hold) | Push-to-talk |
@@ -170,6 +176,23 @@ orbit-desktop --center               # open notifications & widgets
 orbit-desktop --search=hull          # open the command bar with a search
 orbit-desktop --ask="what's using my CPU?"
 ```
+
+### Tray and background (0.3.1)
+Orbit runs as a single instance. Launching it again hands the request to the
+running copy instead of opening a second one:
+```
+orbit-desktop --background   # start hidden in the tray (used by "Start Orbit when I sign in")
+orbit-desktop --show         # bring the running Orbit to the front
+orbit-desktop --hide         # send it to the tray
+orbit-desktop --toggle       # show if hidden, hide if shown
+orbit-desktop --search       # show it with the command bar open
+orbit-desktop --quit         # exit the running Orbit
+```
+Settings → General → **Window & tray** chooses whether the close button hides
+or quits, turns on start-at-sign-in, the global shortcut, and whether
+"Hey Orbit" keeps listening while hidden. On Linux the tray needs a
+StatusNotifier host (KDE, Cinnamon, XFCE, or GNOME with the AppIndicator
+extension); without one, closing minimises instead so Orbit is never lost.
 
 ## Shell
 ```

@@ -103,6 +103,16 @@ pub struct Config {
 
     /// Set once the first-run welcome is finished.
     pub onboarded: bool,
+
+    // --- Tray & background (0.3.1) ---
+    /// Closing the window hides Orbit to the tray instead of quitting.
+    pub close_to_tray: bool,
+    /// The one-time "Orbit is still running" tip has been shown.
+    pub tray_tip_shown: bool,
+    /// Ctrl+Alt+O (Cmd+Option+O on macOS) shows or hides Orbit from anywhere.
+    pub global_hotkey: bool,
+    /// Keep listening for "Hey Orbit" while Orbit is hidden in the tray.
+    pub listen_while_hidden: bool,
 }
 
 impl Default for Config {
@@ -141,6 +151,10 @@ impl Default for Config {
             auto_backup: false,
             last_backup_day: 0,
             onboarded: false,
+            close_to_tray: true,
+            tray_tip_shown: false,
+            global_hotkey: true,
+            listen_while_hidden: false,
         }
     }
 }

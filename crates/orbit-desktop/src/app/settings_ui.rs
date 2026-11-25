@@ -25,6 +25,7 @@ pub(super) struct SettingsState {
     pub backup_status: Option<String>,
     pub confirm_restore: Option<PathBuf>,
     pub image_path: String,
+    pub autostart: Option<bool>,
 }
 
 impl Desktop {
@@ -588,6 +589,72 @@ impl Desktop {
     }
 
     fn settings_general(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Window & tray");
+        ui.label("When I close the Orbit window:");
+        ui.radio_value(
+            &mut self.cfg.close_to_tray,
+            true,
+            "Keep Orbit running in the tray (recommended)",
+        );
+        ui.radio_value(&mut self.cfg.close_to_tray, false, "Quit Orbit");
+        match self.tray_known {
+            Some(false) => {
+                ui.label(RichText::new("No system tray was found on this desktop, so closing minimises Orbit to the taskbar instead.").small().color(theme::WARN));
+            }
+            Some(true) => {
+                ui.label(RichText::new("The Orbit icon is in your system tray. Click it to show or hide Orbit; right-click for the menu.").small().color(theme::DIM));
+            }
+            None => {}
+        }
+        let mut autostart = self
+            .settings
+            .autostart
+            .unwrap_or_else(orbit_core::autostart::is_enabled);
+        if ui
+            .checkbox(
+                &mut autostart,
+                "Start Orbit when I sign in (it opens hidden in the tray)",
+            )
+            .changed()
+        {
+            match orbit_core::autostart::set_enabled(autostart) {
+                Ok(()) => self.notify(if autostart {
+                    "Orbit will start when you sign in"
+                } else {
+                    "Orbit won't start automatically"
+                }),
+                Err(e) => self.notify(format!("Couldn't change start-up: {e}")),
+            }
+            self.settings.autostart = Some(orbit_core::autostart::is_enabled());
+        } else if self.settings.autostart.is_none() {
+            self.settings.autostart = Some(autostart);
+        }
+        if ui
+            .checkbox(
+                &mut self.cfg.global_hotkey,
+                format!(
+                    "Show or hide Orbit from any app with {}",
+                    tray::hotkey_label()
+                ),
+            )
+            .changed()
+        {
+            let on = self.cfg.global_hotkey;
+            self.set_hotkey(on);
+            let _ = self.cfg.save();
+        }
+        ui.checkbox(
+            &mut self.cfg.listen_while_hidden,
+            "Keep listening for \"Hey Orbit\" while hidden",
+        );
+        ui.label(
+            RichText::new(
+                "Quit Orbit from the tray menu, the Orbit menu, the Start menu, or Ctrl+Q.",
+            )
+            .small()
+            .color(theme::DIM),
+        );
+        ui.separator();
         ui.heading("General");
         ui.checkbox(&mut self.cfg.fullscreen, "Start OrbitOS fullscreen");
         ui.horizontal(|ui| {

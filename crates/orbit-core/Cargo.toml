@@ -22,6 +22,7 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 cpal = { version = "0.15", optional = true }
+auto-launch = "0.6"
 rodio = { version = "0.19", optional = true, default-features = false, features = ["symphonia-all"] }
 
 [features]
@@ -31,3 +32,6 @@ default = ["audio", "voice"]
 audio = ["dep:rodio"]
 # Microphone capture for voice (push-to-talk and "Hey Orbit").
 voice = ["dep:cpal"]
+
+[dev-dependencies]
+dirs.workspace = true
