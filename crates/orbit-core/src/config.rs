@@ -113,6 +113,10 @@ pub struct Config {
     pub global_hotkey: bool,
     /// Keep listening for "Hey Orbit" while Orbit is hidden in the tray.
     pub listen_while_hidden: bool,
+    /// Interface size. None = pick automatically from the screen (4K screens get larger text).
+    pub ui_scale: Option<f32>,
+    /// The HD nebula became the standard wallpaper in 0.3.2; switched once for existing setups.
+    pub nebula_default_applied: bool,
 }
 
 impl Default for Config {
@@ -133,7 +137,7 @@ impl Default for Config {
             image_model: String::new(),
             theme: "orbit".into(),
             accent: None,
-            wallpaper: "starfield".into(),
+            wallpaper: "nebula".into(),
             wallpaper_image: None,
             animate_wallpaper: true,
             whisper_bin: None,
@@ -155,6 +159,8 @@ impl Default for Config {
             tray_tip_shown: false,
             global_hotkey: true,
             listen_while_hidden: false,
+            ui_scale: None,
+            nebula_default_applied: true,
         }
     }
 }
@@ -177,10 +183,18 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::path())
+        let mut c: Self = std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if !c.nebula_default_applied {
+            // Old default wallpaper → the new standard one. A deliberate choice is kept.
+            if c.wallpaper == "starfield" {
+                c.wallpaper = "nebula".into();
+            }
+            c.nebula_default_applied = true;
+        }
+        c
     }
 
     pub fn save(&self) -> anyhow::Result<()> {

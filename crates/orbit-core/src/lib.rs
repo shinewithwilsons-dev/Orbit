@@ -14,6 +14,7 @@ pub mod config;
 pub mod exec;
 pub mod files;
 pub mod instance;
+pub mod malware;
 pub mod media;
 pub mod network;
 pub mod office;

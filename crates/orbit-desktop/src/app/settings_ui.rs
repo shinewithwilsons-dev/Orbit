@@ -335,6 +335,43 @@ impl Desktop {
             }
         });
         ui.add_space(6.0);
+        ui.heading("Display");
+        ui.horizontal(|ui| {
+            ui.label("Interface size");
+            let label = |v: Option<f32>| match v {
+                None => "Auto (fits the screen)".to_string(),
+                Some(z) => format!("{:.0}%", z * 100.0),
+            };
+            egui::ComboBox::from_id_source("ui_scale")
+                .selected_text(label(self.cfg.ui_scale))
+                .show_ui(ui, |ui| {
+                    for v in [
+                        None,
+                        Some(1.0),
+                        Some(1.25),
+                        Some(1.5),
+                        Some(1.75),
+                        Some(2.0),
+                        Some(2.5),
+                    ] {
+                        if ui
+                            .selectable_value(&mut self.cfg.ui_scale, v, label(v))
+                            .changed()
+                        {
+                            changed = true;
+                            self.apply_ui_scale();
+                        }
+                    }
+                });
+        });
+        ui.label(
+            RichText::new(
+                "Auto makes text and buttons larger on 4K screens. Ctrl + / Ctrl − also zoom.",
+            )
+            .small()
+            .color(theme::DIM),
+        );
+        ui.add_space(6.0);
         ui.heading("Wallpaper");
         ui.horizontal_wrapped(|ui| {
             for (k, n) in theme::WALLPAPERS {

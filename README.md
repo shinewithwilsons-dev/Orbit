@@ -21,6 +21,7 @@ session, so it boots straight into OrbitOS.
 | **Your own AI server** | Switch between the Claude Code CLI, the Anthropic API, and your **vLLM** (or Ollama / LM Studio) server. Generate images with `/image`. |
 | **Voice** | Push-to-talk (Mic button or hold F9) and **"Hey Orbit"**, transcribed offline by whisper.cpp, with spoken replies. |
 | **Command bar** | Ctrl/Cmd+Space: apps, files, music, settings, maths, or ask Claude, all in one box. |
+| **HD & 4K display** *(new in 0.3.2)* | Fills any screen at start; on 4K screens the interface scales automatically and the new **Orbit nebula** wallpaper is drawn at native resolution, with crisp twinkling stars and a bold **OrbitOS & Claude** logo. |
 | **Orbit Shield** | Antivirus: Orbit engine + ClamAV + YARA, on-arrival protection, daily scans, quarantine, network view with one-click firewall blocks. |
 | **Media** | In-app music with album art, equaliser and playlists. Videos in mpv/VLC, internet radio (50,000+ stations), and your **BeMusic** site. |
 | **Office** | LibreOffice integration, PDF conversion, and Claude-written Word documents. |
@@ -39,8 +40,10 @@ session, so it boots straight into OrbitOS.
 | ![Claude actions](docs/claude-actions.png) | ![Command bar](docs/command-bar.png) |
 | **App Store, widgets & calendar** | **First-run welcome** |
 | ![App Store](docs/app-store.png) | ![Welcome](docs/welcome.png) |
-| **Start menu (0.3.1)** | |
-| ![Start menu](docs/start-menu.png) | |
+| **Start menu (0.3.1)** | **Orbit Shield (0.3.2)** |
+| ![Start menu](docs/start-menu.png) | ![Orbit Shield](docs/shield-dashboard.png) |
+| **Malware removal (0.3.2)** | **HD desktop (0.3.2)** |
+| ![Malware removal](docs/shield-removal.png) | ![Desktop](docs/desktop-nebula.png) |
 
 ## What's inside
 
@@ -102,6 +105,27 @@ Speech never leaves your computer for transcription.
   ReadDirectoryChangesW) check new downloads as soon as they finish.
 - **Daily scheduled quick scan** at the hour you choose.
 - **Quarantine**: files are encoded so they can't run, and can be restored.
+- **New dashboard (0.3.2)**: protection status at the centre, six protection
+  tiles (real-time, signatures, removal, quarantine, network, schedule) and
+  one-click Quick scan, Full scan and Malware sweep.
+
+### Malware removal (0.3.2)
+A **Malware sweep** looks where file scans don't: nothing is changed until you choose.
+- **Startup items**: Run keys and Startup folder (Windows), LaunchAgents
+  (macOS), XDG autostart and `@reboot` cron (Linux). Flags programs that run
+  from temp or Downloads folders, hidden or downloaded scripts, random names
+  and missing files. **Disable at sign-in** is reversible.
+- **Running programs**: started from temp folders, deleted after starting, or
+  flagged by the Orbit engine. **End and quarantine** in one click.
+- **Browser extensions**: Chrome, Edge, Brave, Chromium and Firefox, rated by
+  permissions (every site, traffic, native messaging, off-store installs).
+- **Hosts file**: entries that redirect well-known sites or block security
+  updates; **Repair** comments them out (with a backup) after your password.
+- **Temp cleanup**: deletes temp files older than a day, after you confirm.
+- **Deep-clean tools**: Microsoft Defender full and offline scans and MSRT
+  (Windows), Malwarebytes and KnockKnock (macOS), rkhunter and chkrootkit
+  (Linux), and a ClamAV whole-disk scan. Orbit shows each command first.
+- **Remove all threats** handles everything rated medium or high at once.
 - **Network**: which apps are connected where, **Block** (firewall rule via your
   OS's own password prompt), and **Ask Claude** about any connection or finding.
 
@@ -122,11 +146,11 @@ spreadsheets, presentations and drawings, recent files, **Convert to PDF**, and
 ## Install
 
 ### Installers
-Publish a release on GitHub (Releases → Draft a new release → tag `v0.3.1`) and the
+Publish a release on GitHub (Releases → Draft a new release → tag `v0.3.2`) and the
 **Release installers** workflow builds and attaches:
-- **Windows**: `OrbitOS_0.3.1_x64-setup.exe` (NSIS) and `.msi` (WiX)
-- **macOS**: `OrbitOS_0.3.1_aarch64.dmg` (Apple silicon) and `OrbitOS_0.3.1_x64.dmg` (Intel)
-- **Linux**: `orbit-desktop_0.3.1_amd64.deb` and `.AppImage`
+- **Windows**: `OrbitOS_0.3.2_x64-setup.exe` (NSIS) and `.msi` (WiX)
+- **macOS**: `OrbitOS_0.3.2_aarch64.dmg` (Apple silicon) and `OrbitOS_0.3.2_x64.dmg` (Intel)
+- **Linux**: `orbit-desktop_0.3.2_amd64.deb` and `.AppImage`
 
 The `.deb` also adds **OrbitOS** to your login screen's session list.
 
@@ -233,3 +257,6 @@ workflow builds the installers.
 - WASM plugins for third-party widgets
 
 MIT licensed.
+
+## Credits
+The logo uses **Poppins Bold** by the Poppins Project Authors, under the SIL Open Font License 1.1 (`crates/orbit-desktop/assets/fonts/OFL.txt`).

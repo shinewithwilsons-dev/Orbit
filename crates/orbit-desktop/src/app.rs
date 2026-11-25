@@ -35,6 +35,9 @@ enum Event {
     ScanDone(orbit_core::antivirus::ScanReport),
     Realtime(Vec<orbit_core::antivirus::Finding>),
     ShieldUpdate(Result<String, String>),
+    Sweep(Box<orbit_core::malware::Sweep>),
+    TempCleaned(usize, u64, usize),
+    Nebula(egui::ColorImage),
     MediaLibrary(Vec<orbit_core::media::Item>, Vec<orbit_core::media::Item>),
     OfficeMsg(Result<String, String>),
     DraftDone(Result<PathBuf, String>),
@@ -130,6 +133,10 @@ pub struct Desktop {
     settings: settings_ui::SettingsState,
     settings_tab: settings_ui::Tab,
     wallpaper_tex: Option<egui::TextureHandle>,
+    nebula_tex: Option<egui::TextureHandle>,
+    /// Frames spent waiting for the monitor size (screen fit and 4K setup).
+    display_frames: u32,
+    display_done: bool,
 
     // 0.3.1: tray, background agent, Start menu
     ctl: std::sync::Arc<tray::WinCtl>,
@@ -234,6 +241,9 @@ impl Desktop {
             settings: settings_ui::SettingsState::default(),
             settings_tab: settings_ui::Tab::Claude,
             wallpaper_tex: None,
+            nebula_tex: None,
+            display_frames: 0,
+            display_done: false,
             ctl,
             tray_parts: tray::TrayParts::default(),
             primary,
@@ -320,6 +330,15 @@ impl Desktop {
                 }
                 Event::ScanDone(r) => self.on_scan_done(r),
                 Event::Realtime(f) => self.on_realtime(f),
+                Event::Sweep(s) => self.on_sweep(*s),
+                Event::TempCleaned(n, b, k) => self.on_temp_cleaned(n, b, k),
+                Event::Nebula(img) => {
+                    self.nebula_tex = Some(self.ctx.load_texture(
+                        "nebula",
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
                 Event::ShieldUpdate(r) => {
                     self.shield.updating = false;
                     self.shield.clamav = orbit_core::antivirus::clamav_version();
@@ -592,6 +611,98 @@ impl Desktop {
         }
     }
 
+    /// Fit the screen: pick the interface size (4K screens get larger text)
+    /// and load the HD wallpaper at the screen's real resolution.
+    /// Returns true once the scale has taken effect (one frame after it is set).
+    fn display_setup(&mut self, ctx: &egui::Context) -> bool {
+        if self.display_done {
+            if self.display_frames != u32::MAX {
+                self.display_frames = u32::MAX;
+                return false; // the zoom set last frame applies from this one
+            }
+            return true;
+        }
+        self.display_frames += 1;
+        let (monitor, native) = ctx.input(|i| {
+            (
+                i.viewport().monitor_size,
+                i.viewport().native_pixels_per_point,
+            )
+        });
+        if monitor.is_none() && self.display_frames < 60 {
+            return false;
+        }
+        self.display_done = true;
+        let fullscreen = self.cfg.fullscreen || std::env::args().any(|a| a == "--fullscreen");
+        if !fullscreen && self.background_start.is_none() {
+            // A remembered window size must not stop Orbit filling the screen.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        let ppp = ctx.pixels_per_point();
+        let native = native.unwrap_or(ppp);
+        let points = monitor.unwrap_or_else(|| ctx.screen_rect().size());
+        let physical = points * ppp;
+        self.apply_ui_scale_for(physical.x, native);
+        // Wallpaper at native resolution (never upscaled beyond the 4K master).
+        let (w, h) = (
+            physical.x.round().max(640.0) as u32,
+            physical.y.round().max(400.0) as u32,
+        );
+        let (tx, ctx2) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let Ok(img) =
+                image::load_from_memory(include_bytes!("../assets/wallpapers/orbit-nebula-4k.jpg"))
+            else {
+                return;
+            };
+            let img = if w < img.width() || h < img.height() {
+                img.resize_to_fill(
+                    w.min(img.width()),
+                    h.min(img.height()),
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                img
+            };
+            let rgba = img.to_rgba8();
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                [rgba.width() as usize, rgba.height() as usize],
+                rgba.as_raw(),
+            );
+            let _ = tx.send(Event::Nebula(ci));
+            ctx2.request_repaint();
+        });
+        false
+    }
+
+    fn apply_ui_scale_for(&mut self, physical_width: f32, native_ppp: f32) {
+        let zoom = match self.cfg.ui_scale {
+            Some(z) => z.clamp(0.75, 3.0),
+            None => {
+                let logical = physical_width / native_ppp.max(0.5);
+                if logical > 2400.0 {
+                    (logical / 1920.0).clamp(1.0, 2.5)
+                } else {
+                    1.0
+                }
+            }
+        };
+        self.ctx.set_zoom_factor(zoom);
+    }
+
+    /// Re-apply the interface size after a Settings change.
+    pub(super) fn apply_ui_scale(&mut self) {
+        let (monitor, native) = self.ctx.input(|i| {
+            (
+                i.viewport().monitor_size,
+                i.viewport().native_pixels_per_point,
+            )
+        });
+        let ppp = self.ctx.pixels_per_point();
+        let physical = monitor.unwrap_or_else(|| self.ctx.screen_rect().size()).x * ppp;
+        self.apply_ui_scale_for(physical, native.unwrap_or(ppp / self.ctx.zoom_factor()));
+    }
+
     /// Hide to the tray (or minimise when this desktop has no tray).
     pub(super) fn hide_to_tray(&mut self) {
         self.cmd.open = false;
@@ -689,6 +800,11 @@ impl eframe::App for Desktop {
         self.start_button_clicked = false;
 
         self.pump();
+        if !self.display_setup(ctx) {
+            // Screen size and interface scale are settled first, so windows open at the right size.
+            ctx.request_repaint();
+            return;
+        }
         self.voice_tick(ctx);
         let animated = self.cfg.animate_wallpaper && theme::is_animated(&self.cfg.wallpaper);
         ctx.request_repaint_after(Duration::from_millis(if animated { 50 } else { 500 }));
@@ -725,21 +841,14 @@ impl eframe::App for Desktop {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 self.desk_rect = rect;
-                theme::paint_wallpaper(
-                    ui.painter(),
-                    rect,
-                    ctx.input(|i| i.time),
-                    &self.cfg,
-                    self.wallpaper_tex.as_ref(),
-                );
+                let tex = if self.cfg.wallpaper == "nebula" {
+                    self.nebula_tex.as_ref()
+                } else {
+                    self.wallpaper_tex.as_ref()
+                };
+                theme::paint_wallpaper(ui.painter(), rect, ctx.input(|i| i.time), &self.cfg, tex);
                 if self.cfg.wallpaper != "image" {
-                    ui.painter().text(
-                        rect.center() - egui::vec2(0.0, 30.0),
-                        egui::Align2::CENTER_CENTER,
-                        "OrbitOS",
-                        egui::FontId::proportional(60.0),
-                        Color32::from_white_alpha(36),
-                    );
+                    theme::paint_logo(ui.painter(), rect);
                 }
                 self.desktop_icons(ui, rect);
                 // Quick-ask box near the bottom; text kept in egui memory between frames.

@@ -92,6 +92,7 @@ pub fn theme_def(key: &str) -> &'static ThemeDef {
 }
 
 pub const WALLPAPERS: &[(&str, &str)] = &[
+    ("nebula", "Orbit nebula (HD)"),
     ("starfield", "Starfield"),
     ("warp", "Warp speed"),
     ("planet", "Planet & moon"),
@@ -183,6 +184,109 @@ fn stars(painter: &egui::Painter, rect: Rect, t: f32, count: usize, colour: [u8;
     }
 }
 
+/// Draw a texture so it covers `rect`, keeping its shape.
+fn cover(painter: &egui::Painter, rect: Rect, tex: &egui::TextureHandle) {
+    let size = tex.size_vec2();
+    let scale = (rect.width() / size.x).max(rect.height() / size.y);
+    let draw = Rect::from_center_size(rect.center(), size * scale);
+    painter.image(
+        tex.id(),
+        draw,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// Crisp stars drawn at the screen's own resolution over the nebula picture,
+/// so it stays sharp on 4K screens. They twinkle gently.
+fn twinkle(painter: &egui::Painter, rect: Rect, t: f32) {
+    let mut rng = Rng(0x51A7_0D3B_44E1_9C27);
+    let count = ((rect.width() * rect.height()) / 9000.0).clamp(80.0, 420.0) as usize;
+    for _ in 0..count {
+        let x = rect.left() + rng.next() * rect.width();
+        let y = rect.top() + rng.next() * rect.height() * 0.62;
+        let big = rng.next() > 0.93;
+        let size = if big {
+            1.1 + rng.next() * 0.8
+        } else {
+            0.35 + rng.next() * 0.55
+        };
+        let speed = 0.6 + rng.next() * 1.6;
+        let phase = rng.next() * 6.28;
+        let warm = rng.next() > 0.8;
+        let a = (0.45 + 0.55 * (t * speed + phase).sin()).clamp(0.05, 1.0);
+        let col = if warm {
+            [255, 214, 190]
+        } else {
+            [205, 225, 255]
+        };
+        let c = Pos2::new(x, y);
+        painter.circle_filled(
+            c,
+            size,
+            Color32::from_rgba_unmultiplied(col[0], col[1], col[2], (a * 235.0) as u8),
+        );
+        if big {
+            painter.circle_filled(
+                c,
+                size * 3.2,
+                Color32::from_rgba_unmultiplied(col[0], col[1], col[2], (a * 22.0) as u8),
+            );
+        }
+    }
+}
+
+/// Load the logo font (Poppins Bold, SIL Open Font License) as the "logo" family.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "poppins_bold".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Poppins-Bold.ttf")),
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name("logo".into()),
+        vec!["poppins_bold".into()],
+    );
+    ctx.set_fonts(fonts);
+}
+
+fn logo_job(size: f32, white: Color32, amp: Color32, claude: Color32) -> egui::text::LayoutJob {
+    let font = |s: f32| egui::FontId::new(s, egui::FontFamily::Name("logo".into()));
+    let fmt = |s: f32, c: Color32| egui::TextFormat {
+        font_id: font(s),
+        color: c,
+        valign: egui::Align::Center,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append("OrbitOS", 0.0, fmt(size, white));
+    job.append(" & ", 0.0, fmt(size * 0.72, amp));
+    job.append("Claude", 0.0, fmt(size, claude));
+    job
+}
+
+/// The bold "OrbitOS & Claude" logo in the middle of the desktop.
+pub fn paint_logo(painter: &egui::Painter, rect: Rect) {
+    let size = (rect.width() * 0.058).clamp(40.0, 168.0);
+    let centre = rect.center() - egui::vec2(0.0, rect.height() * 0.07);
+    let shadow = Color32::from_black_alpha(70);
+    let sg = painter.layout_job(logo_job(size, shadow, shadow, shadow));
+    let pos = centre - sg.size() / 2.0;
+    // Soft shadow for legibility over any picture.
+    let k = size / 60.0;
+    for (dx, dy) in [(0.0, 3.0), (1.5, 4.0), (-1.5, 4.0), (0.0, 6.0), (0.0, 8.0)] {
+        let (dx, dy): (f32, f32) = (dx, dy);
+        painter.galley(pos + egui::vec2(dx * k, dy * k), sg.clone(), shadow);
+    }
+    let main = painter.layout_job(logo_job(
+        size,
+        Color32::from_rgb(246, 248, 252),
+        Color32::from_white_alpha(170),
+        CLAUDE,
+    ));
+    painter.galley(pos, main, Color32::WHITE);
+}
+
 /// Paint the desktop wallpaper. `image` is the user's picture, if any.
 pub fn paint_wallpaper(
     painter: &egui::Painter,
@@ -191,6 +295,9 @@ pub fn paint_wallpaper(
     cfg: &orbit_core::Config,
     image: Option<&egui::TextureHandle>,
 ) {
+    // Pictures are scaled to cover the screen; never let them spill over the bars.
+    let clipped = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    let painter = &clipped;
     let th = theme_def(&cfg.theme);
     let t = if cfg.animate_wallpaper { t as f32 } else { 0.0 };
     painter.rect_filled(rect, 0.0, rgb(th.sky));
@@ -200,6 +307,15 @@ pub fn paint_wallpaper(
         [255, 255, 255]
     };
     match cfg.wallpaper.as_str() {
+        "nebula" => {
+            if let Some(tex) = image {
+                cover(painter, rect, tex);
+            } else {
+                // Until the picture has loaded: the same deep blue.
+                painter.rect_filled(rect, 0.0, Color32::from_rgb(8, 16, 30));
+            }
+            twinkle(painter, rect, t);
+        }
         "image" if image.is_some() => {
             let tex = image.unwrap();
             // Cover the screen, keeping the picture's shape.
@@ -363,7 +479,10 @@ pub fn paint_wallpaper(
 
 /// Wallpapers that move.
 pub fn is_animated(wallpaper: &str) -> bool {
-    matches!(wallpaper, "starfield" | "warp" | "planet" | "aurora")
+    matches!(
+        wallpaper,
+        "nebula" | "starfield" | "warp" | "planet" | "aurora"
+    )
 }
 
 // ---------------------------------------------------------------- icons --

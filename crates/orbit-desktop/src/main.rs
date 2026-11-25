@@ -37,7 +37,9 @@ fn main() -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("OrbitOS")
         .with_inner_size([1360.0, 860.0])
-        .with_min_inner_size([900.0, 600.0]);
+        .with_min_inner_size([900.0, 600.0])
+        // Fill the screen on any laptop or monitor; un-maximising restores 1360×860.
+        .with_maximized(true);
     if fullscreen {
         viewport = viewport.with_fullscreen(true);
     }
@@ -61,6 +63,7 @@ fn main() -> eframe::Result<()> {
         "OrbitOS",
         options,
         Box::new(move |cc| {
+            theme::install_fonts(&cc.egui_ctx);
             theme::apply(&cc.egui_ctx, &cfg);
             Box::new(app::Desktop::new(cfg, cc.egui_ctx.clone(), primary))
         }),

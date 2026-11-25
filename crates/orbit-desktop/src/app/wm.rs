@@ -126,7 +126,15 @@ impl Desktop {
         default: [f32; 4],
     ) -> egui::Window<'static> {
         let id = self.win_id(key);
-        let rect = self.wm.state(key).rect.unwrap_or(default);
+        let mut rect = self.wm.state(key).rect.unwrap_or(default);
+        // Keep windows on screen, whatever its size.
+        let d = self.desk_rect;
+        if d.width() > 200.0 && d.height() > 200.0 {
+            rect[2] = rect[2].min(d.width() - 16.0);
+            rect[3] = rect[3].min(d.height() - 16.0);
+            rect[0] = rect[0].clamp(d.min.x + 4.0, (d.max.x - rect[2] - 4.0).max(d.min.x + 4.0));
+            rect[1] = rect[1].clamp(d.min.y + 4.0, (d.max.y - rect[3] - 4.0).max(d.min.y + 4.0));
+        }
         egui::Window::new(title).id(id).default_rect(to_rect(rect))
     }
 
