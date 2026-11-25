@@ -27,7 +27,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # objc2 0.4 (via winit 0.29) does not compile on the newest Rust on macOS; pin until eframe is upgraded
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ runner.os == 'macOS' && '1.90' || 'stable' }}
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libasound2-dev libfuse2 libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
