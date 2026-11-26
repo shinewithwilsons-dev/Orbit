@@ -13,6 +13,7 @@ pub mod claude;
 pub mod config;
 pub mod exec;
 pub mod files;
+pub mod hardware;
 pub mod instance;
 pub mod malware;
 pub mod media;

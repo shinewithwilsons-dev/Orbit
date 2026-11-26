@@ -40,7 +40,7 @@ pub(super) enum Zone {
     Max,
 }
 
-pub(super) const MANAGED: [WinId; 9] = [
+pub(super) const MANAGED: [WinId; 11] = [
     WinId::Files,
     WinId::Terminal,
     WinId::Claude,
@@ -50,6 +50,8 @@ pub(super) const MANAGED: [WinId; 9] = [
     WinId::Store,
     WinId::Monitor,
     WinId::Settings,
+    WinId::Folders,
+    WinId::Hardware,
 ];
 
 fn wm_path() -> PathBuf {
@@ -103,6 +105,8 @@ impl Desktop {
             WinId::Media => &mut self.win.media,
             WinId::Office => &mut self.win.office,
             WinId::Store => &mut self.win.store,
+            WinId::Folders => &mut self.win.folders,
+            WinId::Hardware => &mut self.win.hardware,
             WinId::Monitor => &mut self.win.monitor,
             WinId::Settings => &mut self.win.settings,
         }
@@ -423,6 +427,8 @@ impl Desktop {
             WinId::Media => self.win.media,
             WinId::Office => self.win.office,
             WinId::Store => self.win.store,
+            WinId::Folders => self.win.folders,
+            WinId::Hardware => self.win.hardware,
             WinId::Monitor => self.win.monitor,
             WinId::Settings => self.win.settings,
         }
