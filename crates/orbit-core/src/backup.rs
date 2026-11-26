@@ -54,7 +54,13 @@ fn build_zip(strip_secrets: bool) -> Result<Vec<u8>> {
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
     for (name, path) in files {
-        let mut data = std::fs::read(&path)?;
+        // A file can vanish between listing and reading (the app or another
+        // process is still using the data folder). Skip it rather than fail.
+        let mut data = match std::fs::read(&path) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         if strip_secrets && name == "config/config.toml" {
             let mut cfg: crate::Config =
                 toml::from_str(&String::from_utf8_lossy(&data)).unwrap_or_default();

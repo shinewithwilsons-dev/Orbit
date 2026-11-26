@@ -12,6 +12,8 @@ mod center;
 mod claude_ui;
 mod cmdbar;
 mod files_ui;
+mod folders_ui;
+mod hardware_ui;
 mod icons;
 mod media_ui;
 mod office_ui;
@@ -54,11 +56,14 @@ enum Event {
     Tray(tray::TrayCmd),
     TrayStatus(bool),
     ScheduledScan(i64),
+    HardwareScan(Box<orbit_core::hardware::Report>),
 }
 
 #[derive(Default)]
 struct Windows {
     files: bool,
+    folders: bool,
+    hardware: bool,
     terminal: bool,
     claude: bool,
     monitor: bool,
@@ -106,6 +111,7 @@ pub struct Desktop {
     chat_input: String,
     streaming: Option<String>,
     pending_run: Option<String>,
+    hardware: hardware_ui::HardwareState,
 
     // settings
     key_edit: String,
@@ -193,6 +199,8 @@ impl Desktop {
                     media: has("media"),
                     office: has("office"),
                     store: has("store"),
+                    folders: has("folders"),
+                    hardware: has("hardware"),
                     about: false,
                 }
             },
@@ -220,6 +228,7 @@ impl Desktop {
             chat_input: String::new(),
             streaming: None,
             pending_run: None,
+            hardware: Default::default(),
             icons: icons::default_icons(),
             selected_icon: None,
             files_grid: true,
@@ -331,6 +340,10 @@ impl Desktop {
                 Event::ScanDone(r) => self.on_scan_done(r),
                 Event::Realtime(f) => self.on_realtime(f),
                 Event::Sweep(s) => self.on_sweep(*s),
+                Event::HardwareScan(r) => {
+                    self.hardware.scanning = false;
+                    self.hardware.report = Some(*r);
+                }
                 Event::TempCleaned(n, b, k) => self.on_temp_cleaned(n, b, k),
                 Event::Nebula(img) => {
                     self.nebula_tex = Some(self.ctx.load_texture(
@@ -887,6 +900,8 @@ impl eframe::App for Desktop {
         self.files_window(ctx);
         self.terminal_window(ctx);
         self.claude_window(ctx);
+        self.folders_window(ctx);
+        self.hardware_window(ctx);
         self.monitor_window(ctx);
         self.settings_window(ctx);
         self.about_window(ctx);

@@ -19,15 +19,17 @@ enum Pin {
     Apps,
 }
 
-const PINS: [(&str, Pin); 10] = [
+const PINS: [(&str, Pin); 12] = [
     ("Files", Pin::Win(WinId::Files, Glyph::Folder)),
     ("Terminal", Pin::Win(WinId::Terminal, Glyph::Terminal)),
+    ("Claude folders", Pin::Win(WinId::Folders, Glyph::Folder)),
     ("Claude", Pin::Win(WinId::Claude, Glyph::Claude)),
     ("Shield", Pin::Win(WinId::Shield, Glyph::Shield)),
     ("Media", Pin::Win(WinId::Media, Glyph::Media)),
     ("Office", Pin::Win(WinId::Office, Glyph::Office)),
     ("App Store", Pin::Win(WinId::Store, Glyph::Apps)),
     ("Monitor", Pin::Win(WinId::Monitor, Glyph::Monitor)),
+    ("Hardware setup", Pin::Win(WinId::Hardware, Glyph::Monitor)),
     ("Settings", Pin::Win(WinId::Settings, Glyph::Settings)),
     ("All apps", Pin::Apps),
 ];

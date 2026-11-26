@@ -14,6 +14,8 @@ pub(super) enum WinId {
     Monitor,
     Settings,
     Store,
+    Folders,
+    Hardware,
 }
 
 impl WinId {
@@ -28,6 +30,8 @@ impl WinId {
             WinId::Monitor => "monitor",
             WinId::Settings => "settings",
             WinId::Store => "store",
+            WinId::Folders => "folders",
+            WinId::Hardware => "hardware",
         }
     }
 
@@ -42,6 +46,8 @@ impl WinId {
             WinId::Monitor => "Monitor",
             WinId::Settings => "Settings",
             WinId::Store => "App Store",
+            WinId::Folders => "Claude folders",
+            WinId::Hardware => "Hardware setup",
         }
     }
 }
@@ -87,11 +93,13 @@ pub(super) fn default_icons() -> Vec<DesktopIcon> {
     v.push(app("Files", Glyph::Folder, WinId::Files));
     v.push(app("Terminal", Glyph::Terminal, WinId::Terminal));
     v.push(app("Claude", Glyph::Claude, WinId::Claude));
+    v.push(app("Claude folders", Glyph::Folder, WinId::Folders));
     v.push(app("Orbit Shield", Glyph::Shield, WinId::Shield));
     v.push(app("Media", Glyph::Media, WinId::Media));
     v.push(app("Office", Glyph::Office, WinId::Office));
     v.push(app("App Store", Glyph::Apps, WinId::Store));
     v.push(app("Monitor", Glyph::Monitor, WinId::Monitor));
+    v.push(app("Hardware setup", Glyph::Monitor, WinId::Hardware));
     v.push(app("Settings", Glyph::Settings, WinId::Settings));
     v.push(DesktopIcon {
         label: "Apps".into(),
@@ -138,6 +146,8 @@ impl Desktop {
             WinId::Monitor => self.win.monitor = true,
             WinId::Settings => self.win.settings = true,
             WinId::Store => self.open_store(),
+            WinId::Folders => self.win.folders = true,
+            WinId::Hardware => self.open_hardware(),
         }
         self.wm_show(w);
     }
